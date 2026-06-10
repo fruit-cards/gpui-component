@@ -2021,7 +2021,7 @@ impl InputState {
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.stop(cx);
         });
-        Root::update(window, cx, |root, _, _| {
+        Root::update_if_present(window, cx, |root, _, _| {
             root.focused_input = None;
         });
         cx.emit(InputEvent::Blur);

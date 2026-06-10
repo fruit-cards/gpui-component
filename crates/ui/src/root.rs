@@ -111,12 +111,30 @@ impl Root {
         root.update(cx, |root, cx| f(root, window, cx))
     }
 
+    /// Like [`Root::update`], but a no-op returning `None` when the
+    /// window's root view is not a `Root` — for components (e.g.
+    /// `Input`) embedded in a host application whose windows carry
+    /// their own root view type.
+    pub fn update_if_present<F, R>(window: &mut Window, cx: &mut App, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> R,
+    {
+        let root = window.root::<Root>().flatten()?;
+        Some(root.update(cx, |root, cx| f(root, window, cx)))
+    }
+
     pub fn read<'a>(window: &'a Window, cx: &'a App) -> &'a Self {
         &window
             .root::<Root>()
             .expect("The window root view should be of type `ui::Root`.")
             .unwrap()
             .read(cx)
+    }
+
+    /// Like [`Root::read`], but `None` when the window's root view is
+    /// not a `Root`. See [`Root::update_if_present`].
+    pub fn try_read<'a>(window: &'a Window, cx: &'a App) -> Option<&'a Self> {
+        Some(window.root::<Root>()??.read(cx))
     }
 
     // Render Notification layer.
