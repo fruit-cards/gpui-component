@@ -1009,6 +1009,23 @@ impl InputState {
         self.focus(window, cx);
     }
 
+    /// Move the cursor to a byte offset (clamped to the text length)
+    /// WITHOUT changing window focus — unlike [`Self::set_cursor_position`],
+    /// which also focuses the input. For programmatic writes into an
+    /// input that should stay unfocused (e.g. a mirrored display surface).
+    pub fn set_cursor_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = offset.min(self.text.len());
+        self.move_to(offset, None, cx);
+        self.update_preferred_column();
+    }
+
+    /// Whether this input is in a single-line mode. Callers writing
+    /// arbitrary text programmatically can use this to know newlines
+    /// must be sanitized first (single-line text layout rejects them).
+    pub fn is_single_line(&self) -> bool {
+        self.mode.is_single_line()
+    }
+
     /// Focus the input field.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
