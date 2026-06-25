@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
@@ -149,11 +150,34 @@ impl ListDelegate for ContextMenuDelegate {
     fn set_selected_index(
         &mut self,
         ix: Option<crate::IndexPath>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) {
         self.selected_ix = ix.map(|i| i.row).unwrap_or(0);
         cx.notify();
+
+        // Lazily fetch the signature + docstring for the highlighted item
+        // (`completionItem/resolve`) — providers may return cheap label-only items
+        // and fill detail/documentation on demand here.
+        let sel = self.selected_ix;
+        let Some(item) = self.items.get(sel) else {
+            return;
+        };
+        if item.detail.is_some() || item.documentation.is_some() {
+            return; // already resolved
+        }
+        // A shared, mutable copy of the items the provider fills in; the resolved
+        // entry is copied back into the menu when the (possibly async) task lands.
+        let buffer: Rc<RefCell<Box<[CompletionItem]>>> = Rc::new(RefCell::new(
+            self.items
+                .iter()
+                .map(|i| (**i).clone())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ));
+        self.menu.update(cx, |menu, cx| {
+            menu.resolve_selected(sel, buffer, window, cx);
+        });
     }
 
     fn confirm(&mut self, _: bool, window: &mut Window, cx: &mut Context<ListState<Self>>) {
@@ -269,6 +293,45 @@ impl CompletionMenu {
         .detach();
 
         self.hide(cx);
+    }
+
+    /// Resolve the highlighted item's detail/documentation via the provider, then
+    /// copy the result back into the menu and re-render (so the docs panel shows).
+    /// Triggered from `ContextMenuDelegate::set_selected_index`.
+    fn resolve_selected(
+        &mut self,
+        ix: usize,
+        buffer: Rc<RefCell<Box<[CompletionItem]>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.editor.clone();
+        let list = self.list.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            // Hand the buffer to the provider; it fills the item in place and
+            // returns whether anything changed.
+            let task = editor.update(cx, |editor, cx| {
+                editor
+                    .lsp
+                    .completion_provider
+                    .clone()
+                    .map(|provider| provider.resolve_completions(vec![ix], buffer.clone(), cx))
+            });
+            let Some(task) = task else {
+                return;
+            };
+            if let Ok(true) = task.await {
+                let _ = list.update(cx, |list, cx| {
+                    if let Some(resolved) = buffer.borrow().get(ix).cloned() {
+                        if let Some(slot) = list.delegate_mut().items.get_mut(ix) {
+                            *slot = Rc::new(resolved);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn handle_action(

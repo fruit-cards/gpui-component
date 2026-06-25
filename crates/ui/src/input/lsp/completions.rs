@@ -3,7 +3,6 @@ use gpui::{Context, EntityInputHandler, Task, Window};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionResponse, InlineCompletionContext,
     InlineCompletionItem, InlineCompletionResponse, InlineCompletionTriggerKind,
-    request::Completion,
 };
 use ropey::Rope;
 use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
@@ -67,10 +66,14 @@ pub trait CompletionProvider {
         DEFAULT_INLINE_COMPLETION_DEBOUNCE
     }
 
+    /// Resolve additional detail (signature / documentation) for the completion
+    /// items at `completion_indices`, mutating them in `completions` in place
+    /// (the LSP `completionItem/resolve` step). Called when the user highlights an
+    /// item. Return `Ok(true)` if anything was filled in (triggers a re-render).
     fn resolve_completions(
         &self,
         _completion_indices: Vec<usize>,
-        _completions: Rc<RefCell<Box<[Completion]>>>,
+        _completions: Rc<RefCell<Box<[CompletionItem]>>>,
         _: &mut Context<InputState>,
     ) -> Task<Result<bool>> {
         Task::ready(Ok(false))
