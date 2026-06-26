@@ -218,10 +218,17 @@ impl InputState {
 
     pub(super) fn indent_inline(
         &mut self,
-        _: &IndentInline,
+        action: &IndentInline,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Tab confirms the highlighted completion when the menu is open (Excel
+        // formula AutoComplete parity — Tab and Enter both accept). Mirror
+        // `enter`: route to the context menu first and stop here if it consumed
+        // the action, before falling through to inline-completion / indent.
+        if self.handle_action_for_context_menu(Box::new(action.clone()), window, cx) {
+            return;
+        }
         // First, try to accept inline completion if present
         if self.accept_inline_completion(window, cx) {
             return;
