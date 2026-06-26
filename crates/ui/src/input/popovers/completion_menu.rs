@@ -150,7 +150,7 @@ impl ListDelegate for ContextMenuDelegate {
     fn set_selected_index(
         &mut self,
         ix: Option<crate::IndexPath>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) {
         self.selected_ix = ix.map(|i| i.row).unwrap_or(0);
@@ -175,9 +175,17 @@ impl ListDelegate for ContextMenuDelegate {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         ));
-        self.menu.update(cx, |menu, cx| {
-            menu.resolve_selected(sel, buffer, window, cx);
-        });
+        // DEFER: `set_selected_index` runs *inside* a CompletionMenu update (the menu
+        // calls `list.set_selected_index(0)` when it opens), so updating the menu
+        // synchronously here re-enters it and gpui panics. Spawning runs the resolve
+        // after the current update unwinds.
+        let menu = self.menu.clone();
+        cx.spawn(async move |_, cx| {
+            let _ = menu.update(cx, |menu, cx| {
+                menu.resolve_selected(sel, buffer, cx);
+            });
+        })
+        .detach();
     }
 
     fn confirm(&mut self, _: bool, window: &mut Window, cx: &mut Context<ListState<Self>>) {
@@ -302,12 +310,11 @@ impl CompletionMenu {
         &mut self,
         ix: usize,
         buffer: Rc<RefCell<Box<[CompletionItem]>>>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let editor = self.editor.clone();
         let list = self.list.clone();
-        cx.spawn_in(window, async move |_, cx| {
+        cx.spawn(async move |_, cx| {
             // Hand the buffer to the provider; it fills the item in place and
             // returns whether anything changed.
             let task = editor.update(cx, |editor, cx| {
