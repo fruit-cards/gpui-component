@@ -3,7 +3,7 @@ use gpui::{App, Context, Hsla, MouseMoveEvent, Task, Window};
 use ropey::Rope;
 use std::rc::Rc;
 
-use crate::input::{InputState, RopeExt, popovers::ContextMenu};
+use crate::input::{Enter, InputState, RopeExt, popovers::ContextMenu};
 
 mod code_actions;
 mod completions;
@@ -84,6 +84,26 @@ impl InputState {
         };
 
         menu.is_open(cx)
+    }
+
+    /// If a completion (or code-action) menu is open, confirm the highlighted
+    /// item and return `true`; otherwise return `false`.
+    ///
+    /// Built-in `Enter` handling already does this. This is the public hook for
+    /// host apps that bind a *different* key to their own action **at the input
+    /// node** — bypassing the input's `Enter` listener — and want it to accept a
+    /// completion when one is showing (e.g. a spreadsheet binding `Tab` to
+    /// commit-and-move-cell, which should accept a completion instead while the
+    /// menu is up). The caller checks the return and skips its own behaviour.
+    pub fn confirm_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.handle_action_for_context_menu(
+            Box::new(Enter {
+                secondary: false,
+                shift: false,
+            }),
+            window,
+            cx,
+        )
     }
 
     /// Handles an action for the completion menu, if it exists.
