@@ -354,6 +354,12 @@ impl CompletionMenu {
         cx.propagate();
         if input::Enter::is_primary(&*action) {
             self.on_action_enter(window, cx);
+        } else if action.partial_eq(&input::IndentInline) {
+            // Tab accepts the highlighted completion — Excel formula AutoComplete
+            // parity (Tab and Enter both confirm). The `!self.open` guard above
+            // means Tab still falls through to `IndentInline` (indent) when the
+            // menu is closed.
+            self.on_action_enter(window, cx);
         } else if action.partial_eq(&input::Escape) {
             self.on_action_escape(window, cx);
         } else if action.partial_eq(&input::MoveUp) {
