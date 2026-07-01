@@ -1311,6 +1311,29 @@ impl TextElement {
             flush_range(start_line, line, false, &mut styles);
         }
 
+        // Overlay host-supplied semantic highlights (e.g. `ty`'s Python tokens
+        // for `=PY()` cells) authoritatively over the grammar's coloring. The
+        // grammar paints the whole `=PY("…")` string body one opaque `@string`
+        // color, so we can't rely on `combine_highlights`' fold (its active-set
+        // order is nondeterministic on same-field overlap) — instead we clip the
+        // base styles out from under each semantic range, then append the
+        // semantic runs so the merged set is disjoint and deterministic.
+        if let Some(semantic) = state.mode.semantic_highlights() {
+            let in_view: Vec<_> = semantic
+                .borrow()
+                .iter()
+                .filter(|(range, _)| {
+                    range.start < visible_byte_range.end && range.end > visible_byte_range.start
+                })
+                .cloned()
+                .collect();
+            if !in_view.is_empty() {
+                styles = clip_out_ranges(styles, &in_view);
+                styles.extend(in_view);
+                styles.sort_by_key(|(range, _)| range.start);
+            }
+        }
+
         let diagnostic_styles = diagnostics.styles_for_range(&visible_byte_range, cx);
 
         // hover definition style
@@ -1323,6 +1346,45 @@ impl TextElement {
 
         Some(styles)
     }
+}
+
+/// Remove from `base` (each entry a byte range + its style) every sub-range
+/// covered by a `cut` range, returning the surviving fragments. Used to make a
+/// semantic-highlight overlay authoritative: clip the grammar's styles out from
+/// under the overlay so the two sets are disjoint and the final merge can't
+/// pick the wrong color on overlap. `cut` styles are ignored — only their
+/// ranges matter. Cost is O(base × cuts), fine for a single cell's token count.
+fn clip_out_ranges(
+    base: Vec<(Range<usize>, HighlightStyle)>,
+    cuts: &[(Range<usize>, HighlightStyle)],
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut out = Vec::with_capacity(base.len());
+    for (range, style) in base {
+        // Fragments of this base range not yet covered by a cut.
+        let mut segments = vec![range];
+        for (cut, _) in cuts {
+            let mut next = Vec::with_capacity(segments.len() + 1);
+            for seg in segments {
+                if cut.end <= seg.start || cut.start >= seg.end {
+                    next.push(seg); // disjoint — keep whole
+                } else {
+                    if seg.start < cut.start {
+                        next.push(seg.start..cut.start); // left remainder
+                    }
+                    if cut.end < seg.end {
+                        next.push(cut.end..seg.end); // right remainder
+                    }
+                }
+            }
+            segments = next;
+        }
+        for seg in segments {
+            if !seg.is_empty() {
+                out.push((seg, style));
+            }
+        }
+    }
+    out
 }
 
 pub(super) struct PrepaintState {
@@ -2265,6 +2327,45 @@ fn split_runs_by_bg_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_clip_out_ranges_carves_cuts_from_base() {
+        let base_style = HighlightStyle {
+            color: Some(gpui::red()),
+            ..Default::default()
+        };
+        let cut_style = HighlightStyle::default();
+        let ranges = |v: &[(Range<usize>, HighlightStyle)]| {
+            v.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>()
+        };
+
+        // A cut in the middle splits the base range into two remainders, and the
+        // surviving fragments keep the base style (not the cut's).
+        let out = clip_out_ranges(vec![(0..10, base_style)], &[(3..6, cut_style)]);
+        assert_eq!(ranges(&out), vec![0..3, 6..10]);
+        assert!(out.iter().all(|(_, s)| s.color == Some(gpui::red())));
+
+        // A cut covering the whole base range removes it entirely.
+        assert!(clip_out_ranges(vec![(2..5, base_style)], &[(0..10, cut_style)]).is_empty());
+
+        // A disjoint cut leaves the base untouched.
+        assert_eq!(
+            ranges(&clip_out_ranges(
+                vec![(0..3, base_style)],
+                &[(5..8, cut_style)]
+            )),
+            vec![0..3]
+        );
+
+        // Cuts at the edges trim only the overlapping side.
+        assert_eq!(
+            ranges(&clip_out_ranges(
+                vec![(0..10, base_style)],
+                &[(0..4, cut_style), (8..12, cut_style)]
+            )),
+            vec![4..8]
+        );
+    }
 
     #[test]
     fn test_editor_scrollbar_layout_uses_current_scroll_size() {

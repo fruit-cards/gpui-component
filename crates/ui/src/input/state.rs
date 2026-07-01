@@ -5,7 +5,8 @@
 use anyhow::Result;
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    EventEmitter, FocusHandle, Focusable, HighlightStyle, InteractiveElement as _, IntoElement,
+    KeyBinding,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString, Styled as _,
     Subscription, Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _,
@@ -700,6 +701,25 @@ impl InputState {
     #[inline]
     pub fn diagnostics_mut(&mut self) -> Option<&mut DiagnosticSet> {
         self.mode.diagnostics_mut()
+    }
+
+    /// Replace the host-supplied semantic highlight overlay for a code editor.
+    ///
+    /// `ranges` are byte offsets into the current buffer text, each paired with
+    /// the [`HighlightStyle`] to paint. They are layered *on top of* the
+    /// tree-sitter highlighter output (so a host can add type-aware coloring the
+    /// grammar can't infer — e.g. `ty`'s Python semantic tokens for `=PY()`
+    /// cells). No-op outside [`InputMode::CodeEditor`]. Pass an empty `Vec` to
+    /// clear. Recompute + call this whenever the analysis or the text changes.
+    pub fn set_semantic_highlights(
+        &mut self,
+        ranges: Vec<(Range<usize>, HighlightStyle)>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(semantic_highlights) = self.mode.semantic_highlights() {
+            *semantic_highlights.borrow_mut() = ranges;
+            cx.notify();
+        }
     }
 
     /// Set placeholder

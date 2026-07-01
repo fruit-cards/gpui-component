@@ -2,7 +2,7 @@ use std::rc::Rc;
 use std::time::Duration;
 use std::{cell::RefCell, ops::Range};
 
-use gpui::{App, SharedString, Task};
+use gpui::{App, HighlightStyle, SharedString, Task};
 use ropey::Rope;
 
 use super::display_map::DisplayMap;
@@ -45,6 +45,13 @@ pub(crate) enum InputMode {
         folding: bool,
         highlighter: Rc<RefCell<Option<SyntaxHighlighter>>>,
         diagnostics: DiagnosticSet,
+        /// Externally-supplied semantic highlight runs, byte-ranged into the
+        /// buffer text. Overlaid on top of the tree-sitter highlighter output at
+        /// paint (see `TextElement::highlight_lines`) so a host can drive
+        /// type-aware coloring the grammar can't — e.g. Expanse feeds `ty`'s
+        /// Python semantic tokens for `=PY()` cells. Empty by default; the host
+        /// owns the contents via [`InputState::set_semantic_highlights`].
+        semantic_highlights: Rc<RefCell<Vec<(Range<usize>, HighlightStyle)>>>,
         parse_task: Rc<RefCell<Option<Task<()>>>>,
     },
 }
@@ -78,6 +85,7 @@ impl InputMode {
             indent_guides: true,
             folding: true,
             diagnostics: DiagnosticSet::new(&Rope::new()),
+            semantic_highlights: Rc::new(RefCell::new(Vec::new())),
             parse_task: Rc::new(RefCell::new(None)),
         }
     }
@@ -300,6 +308,19 @@ impl InputMode {
             _ => None,
         }
     }
+
+    /// The host-owned semantic highlight overlay (if in code-editor mode).
+    pub(super) fn semantic_highlights(
+        &self,
+    ) -> Option<&Rc<RefCell<Vec<(Range<usize>, HighlightStyle)>>>> {
+        match self {
+            InputMode::CodeEditor {
+                semantic_highlights,
+                ..
+            } => Some(semantic_highlights),
+            _ => None,
+        }
+    }
 }
 
 /// Builds the tree-sitter edit for a text replacement.
@@ -407,6 +428,7 @@ mod tests {
             language: "rust".into(),
             highlighter: Default::default(),
             diagnostics: DiagnosticSet::new(&Rope::new()),
+            semantic_highlights: Default::default(),
             parse_task: Default::default(),
         };
         assert_eq!(mode.is_code_editor(), true);
