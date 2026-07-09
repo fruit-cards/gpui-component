@@ -1794,6 +1794,20 @@ impl InputState {
         self.last_layout.as_ref().map(|l| l.visible_range.clone())
     }
 
+    /// Whether this input is in single-line mode. Thin public accessor over
+    /// the internal `mode`, for callers that must sanitize newlines before
+    /// writing (single-line text layout panics on embedded `\n`).
+    pub fn is_single_line(&self) -> bool {
+        self.mode.is_single_line()
+    }
+
+    /// Move the caret to a byte `offset` (clamped to the text length) without
+    /// changing focus. Offset-based twin of [`set_cursor_position`], for
+    /// callers that already hold a byte offset (mirror seeding, caret restore).
+    pub fn set_cursor_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.move_to(offset, None, cx);
+    }
+
     /// Current scroll offset of the editor viewport.
     pub fn scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
         self.scroll_handle.offset()

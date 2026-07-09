@@ -3,7 +3,6 @@ use gpui::{Context, EntityInputHandler, Task, Window};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionResponse, InlineCompletionContext,
     InlineCompletionItem, InlineCompletionResponse, InlineCompletionTriggerKind,
-    request::Completion,
 };
 use ropey::Rope;
 use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
@@ -70,7 +69,7 @@ pub trait CompletionProvider {
     fn resolve_completions(
         &self,
         _completion_indices: Vec<usize>,
-        _completions: Rc<RefCell<Box<[Completion]>>>,
+        _completions: Rc<RefCell<Box<[CompletionItem]>>>,
         _: &mut Context<InputState>,
     ) -> Task<Result<bool>> {
         Task::ready(Ok(false))
