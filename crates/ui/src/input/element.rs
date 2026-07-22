@@ -649,6 +649,37 @@ impl TextElement {
         // print_points_as_svg_path(&line_corners, &points);
 
         let path_origin = bounds.origin + point(line_number_width, px(0.));
+
+        // Diagnostic (env-gated, off by default): dump the rect this path
+        // will occupy. Expanse chased a screen-filling highlight overlay
+        // through several wrong diagnoses for want of this number — the
+        // element's own bounds measured correct every time, so the defect
+        // had to be in the path geometry, which nothing could observe.
+        // Set EXPANSE_DEBUG_SELECTION_PATH=1 to print it.
+        if std::env::var_os("EXPANSE_DEBUG_SELECTION_PATH").is_some() {
+            let min_x = points.iter().map(|p| p.x).fold(px(f32::MAX), Pixels::min);
+            let max_x = points.iter().map(|p| p.x).fold(px(f32::MIN), Pixels::max);
+            let min_y = points.iter().map(|p| p.y).fold(px(f32::MAX), Pixels::min);
+            let max_y = points.iter().map(|p| p.y).fold(px(f32::MIN), Pixels::max);
+            eprintln!(
+                "[selection-path] elem_bounds={:?} line_number_width={:?} path_origin={:?} \
+                 pts={} local_x={:?}..{:?} local_y={:?}..{:?} \
+                 ABS_x={:?}..{:?} ABS_y={:?}..{:?}",
+                bounds,
+                line_number_width,
+                path_origin,
+                points.len(),
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+                path_origin.x + min_x,
+                path_origin.x + max_x,
+                path_origin.y + min_y,
+                path_origin.y + max_y,
+            );
+        }
+
         let first_p = *points.get(0).unwrap();
         let mut builder = gpui::PathBuilder::fill();
         builder.move_to(path_origin + first_p);
