@@ -1,7 +1,7 @@
 use gpui::Corners;
 use gpui::Half;
 use gpui::{
-    AnyElement, App, Bounds, Edges, Element, ElementId, ElementInputHandler, Entity,
+    AnyElement, App, Bounds, ContentMask, Edges, Element, ElementId, ElementInputHandler, Entity,
     GlobalElementId,
 };
 use gpui::{
@@ -1949,36 +1949,50 @@ impl Element for TextElement {
             }
         }
 
-        // Paint indent guides
-        if let Some(path) = prepaint.indent_guides_path.take() {
-            window.paint_path(path, cx.theme().border.opacity(0.85));
-        }
-
-        // Paint selections
-        if window.is_window_active() {
-            let secondary_selection = cx.theme().selection.saturation(0.1);
-            for (path, is_active) in prepaint.search_match_paths.iter() {
-                window.paint_path(path.clone(), secondary_selection);
-
-                if *is_active {
-                    window.paint_path(path.clone(), cx.theme().selection);
+        // Clip every filled `Path` we paint below to the input's own bounds, mirroring
+        // Zed's `EditorElement::paint_text` (`with_content_mask(text_hitbox.bounds)`).
+        // `window.paint_path` stamps each path with the *ambient* content mask, so
+        // without this an oversized or degenerate selection/highlight path (e.g. built
+        // from a mis-measured content rect inside a CSS-grid form) escapes the input and
+        // fills the whole window with `theme.selection` — the cyan-blob artefact. In the
+        // common case the path already lives inside the input, so the clip is a no-op.
+        window.with_content_mask(
+            Some(ContentMask {
+                bounds: input_bounds,
+            }),
+            |window| {
+                // Paint indent guides
+                if let Some(path) = prepaint.indent_guides_path.take() {
+                    window.paint_path(path, cx.theme().border.opacity(0.85));
                 }
-            }
 
-            if let Some(path) = prepaint.selection_path.take() {
-                window.paint_path(path, cx.theme().selection);
-            }
+                // Paint selections
+                if window.is_window_active() {
+                    let secondary_selection = cx.theme().selection.saturation(0.1);
+                    for (path, is_active) in prepaint.search_match_paths.iter() {
+                        window.paint_path(path.clone(), secondary_selection);
 
-            // Paint hover highlight
-            if let Some(path) = prepaint.hover_highlight_path.take() {
-                window.paint_path(path, secondary_selection);
-            }
-        }
+                        if *is_active {
+                            window.paint_path(path.clone(), cx.theme().selection);
+                        }
+                    }
 
-        // Paint document colors
-        for (path, color) in prepaint.document_color_paths.iter() {
-            window.paint_path(path.clone(), *color);
-        }
+                    if let Some(path) = prepaint.selection_path.take() {
+                        window.paint_path(path, cx.theme().selection);
+                    }
+
+                    // Paint hover highlight
+                    if let Some(path) = prepaint.hover_highlight_path.take() {
+                        window.paint_path(path, secondary_selection);
+                    }
+                }
+
+                // Paint document colors
+                for (path, color) in prepaint.document_color_paths.iter() {
+                    window.paint_path(path.clone(), *color);
+                }
+            },
+        );
 
         // Paint text with inline completion ghost line support
         let mut offset_y = invisible_top_padding;
