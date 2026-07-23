@@ -641,6 +641,21 @@ impl TextElement {
 
         let path_origin = bounds.origin + point(line_number_width, px(0.));
         let first_p = *points.get(0).unwrap();
+
+        // TEMP #1163 instrumentation — remove before merge.
+        {
+            let min_x = points.iter().map(|p| p.x).fold(px(f32::MAX), |a, b| a.min(b));
+            let max_x = points.iter().map(|p| p.x).fold(px(f32::MIN), |a, b| a.max(b));
+            let min_y = points.iter().map(|p| p.y).fold(px(f32::MAX), |a, b| a.min(b));
+            let max_y = points.iter().map(|p| p.y).fold(px(f32::MIN), |a, b| a.max(b));
+            eprintln!(
+                "[#1163] selection path: input_rect_origin={:?} size={:?} | path_origin={:?} | \
+                 pts_local x[{:?}..{:?}] y[{:?}..{:?}] | corners={}",
+                bounds.origin, bounds.size, path_origin, min_x, max_x, min_y, max_y,
+                line_corners.len(),
+            );
+        }
+
         let mut builder = gpui::PathBuilder::fill();
         builder.move_to(path_origin + first_p);
         for p in points.iter().skip(1) {
@@ -1883,6 +1898,14 @@ impl Element for TextElement {
         let show_cursor = self.state.read(cx).show_cursor(window, cx);
         let focused = focus_handle.is_focused(window);
         let bounds = prepaint.bounds;
+
+        // TEMP #1163 instrumentation — remove before merge.
+        if focused {
+            eprintln!(
+                "[#1163] paint: input_bounds origin={:?} size={:?} | prepaint.bounds origin={:?} size={:?}",
+                input_bounds.origin, input_bounds.size, bounds.origin, bounds.size,
+            );
+        }
         let selected_range = self.state.read(cx).selected_range;
         let text_align = prepaint.last_layout.text_align;
 
