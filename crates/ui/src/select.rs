@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, ClickEvent, Context, DismissEvent, Edges, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, Length, ParentElement,
-    Render, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window,
+    FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement, Length, ParentElement, Render,
+    RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window,
     anchored, deferred, div, prelude::FluentBuilder, px, rems,
 };
 use rust_i18n::t;
@@ -9,8 +9,7 @@ use rust_i18n::t;
 use crate::{
     ActiveTheme, Disableable, ElementExt as _, Icon, IconName, IndexPath, Sizable, Size,
     StyleSized, StyledExt,
-    actions::{Cancel, Confirm, SelectDown, SelectUp},
-    global_state::GlobalState,
+    actions::Cancel,
     h_flex,
     input::{clear_button, input_style},
     list::List,
@@ -19,6 +18,7 @@ use crate::{
     },
     v_flex,
 };
+use gpui_base::{GlobalState, Select as BaseSelect};
 
 // MARK: Public re-exports for back-compat
 
@@ -33,20 +33,35 @@ pub use crate::searchable_list::SearchableListItemElement as SelectListItem;
 /// Re-exported for backward compatibility.
 pub use crate::searchable_list::SearchableVec;
 
-const CONTEXT: &str = "Select";
+#[derive(IntoElement)]
+pub struct Caret {
+    size: Size,
+    color: Option<Hsla>,
+}
 
-pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("up", SelectUp, Some(CONTEXT)),
-        KeyBinding::new("down", SelectDown, Some(CONTEXT)),
-        KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
-        KeyBinding::new(
-            "secondary-enter",
-            Confirm { secondary: true },
-            Some(CONTEXT),
-        ),
-        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
-    ])
+impl Caret {
+    /// Create a select caret sized for its trigger.
+    pub fn new(size: Size) -> Self {
+        Self { size, color: None }
+    }
+
+    /// Set the caret color.
+    pub fn text_color(mut self, color: Hsla) -> Self {
+        self.color = Some(color);
+        self
+    }
+}
+
+impl RenderOnce for Caret {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        Icon::new(IconName::ChevronDown)
+            .with_size(match self.size {
+                Size::XSmall => Size::XSmall,
+                Size::Small => Size::Small,
+                _ => Size::Medium,
+            })
+            .when_some(self.color, |this, color| this.text_color(color))
+    }
 }
 
 /// Events emitted by [`SelectState`].
@@ -173,11 +188,8 @@ where
                         let new_selection = weak_confirm.update(cx, |this, cx| {
                             this.state.selection = selection;
 
-                            let final_value = this
-                                .state
-                                .selection
-                                .first()
-                                .map(|(_, i)| i.value().clone());
+                            let final_value =
+                                this.state.selection.first().map(|(_, i)| i.value().clone());
 
                             cx.emit(SelectEvent::Confirm(final_value));
                             cx.notify();
@@ -207,9 +219,7 @@ where
                     move |list_state, window, cx| {
                         let committed_ix = weak_cancel
                             .upgrade()
-                            .and_then(|e| {
-                                e.read(cx).state.selection.first().map(|(ix, _)| *ix)
-                            });
+                            .and_then(|e| e.read(cx).state.selection.first().map(|(ix, _)| *ix));
 
                         list_state.set_selected_index(committed_ix, window, cx);
 
@@ -283,12 +293,21 @@ where
     ///
     /// Looks up the position from the delegate and sets the selected index accordingly.
     /// Passes `None` when the value is not found.
+    ///
+    /// The delegate looks the value up in its matched items, so an active search query is
+    /// cleared first to get an index into the full item list.
     pub fn set_selected_value(
         &mut self,
         selected_value: &<D::Item as SearchableListItem>::Value,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.state.list.update(cx, |list, cx| {
+            if !list.query_input.read(cx).value().is_empty() {
+                list.set_query("", window, cx);
+            }
+        });
+
         let selected_index = self
             .state
             .list
@@ -343,35 +362,6 @@ where
         cx.notify();
     }
 
-    fn up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.state.open {
-            self.set_open(true, cx);
-        }
-
-        self.state.list.focus_handle(cx).focus(window, cx);
-        cx.propagate();
-    }
-
-    fn down(&mut self, _: &SelectDown, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.state.open {
-            self.set_open(true, cx);
-        }
-
-        self.state.list.focus_handle(cx).focus(window, cx);
-        cx.propagate();
-    }
-
-    fn enter(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        cx.propagate();
-
-        if !self.state.open {
-            self.set_open(true, cx);
-            cx.notify();
-        }
-
-        self.state.list.focus_handle(cx).focus(window, cx);
-    }
-
     fn toggle_menu(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
 
@@ -400,9 +390,9 @@ where
         self.state.open = open;
 
         if self.state.open {
-            GlobalState::global_mut(cx).register_deferred_popover(&self.state.focus_handle)
+            GlobalState::register_deferred_popover(&self.state.focus_handle, cx)
         } else {
-            GlobalState::global_mut(cx).unregister_deferred_popover(&self.state.focus_handle)
+            GlobalState::unregister_deferred_popover(&self.state.focus_handle, cx)
         }
 
         cx.notify();
@@ -493,14 +483,6 @@ where
                             .when(self.state.disabled, |this| this.opacity(0.5))
                             .border_color(cx.theme().input)
                             .rounded(cx.theme().radius)
-                            .when(cx.theme().shadow, |this| this.shadow_xs())
-                    })
-                    .map(|this| {
-                        if self.state.disabled {
-                            this.shadow_none()
-                        } else {
-                            this
-                        }
                     })
                     .overflow_hidden()
                     .input_size(self.state.size)
@@ -537,11 +519,16 @@ where
                             })
                             .when(!show_clean, |this| {
                                 let icon = match self.icon.clone() {
-                                    Some(icon) => icon,
-                                    None => Icon::new(IconName::ChevronDown),
+                                    Some(icon) => icon
+                                        .xsmall()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .into_any_element(),
+                                    None => Caret::new(self.state.size)
+                                        .text_color(cx.theme().muted_foreground)
+                                        .into_any_element(),
                                 };
 
-                                this.child(icon.xsmall().text_color(cx.theme().muted_foreground))
+                                this.child(icon)
                             }),
                     )
                     .on_prepaint({
@@ -563,7 +550,7 @@ where
                                     v_flex()
                                         .occlude()
                                         .mt_1p5()
-                                        .bg(cx.theme().background)
+                                        .bg(cx.theme().tokens.popover)
                                         .border_1()
                                         .border_color(cx.theme().border)
                                         .rounded(popup_radius)
@@ -661,7 +648,9 @@ where
         mut self,
         builder: impl Fn(&mut Window, &App) -> E + 'static,
     ) -> Self {
-        self.empty = Some(Box::new(move |window, cx| builder(window, cx).into_any_element()));
+        self.empty = Some(Box::new(move |window, cx| {
+            builder(window, cx).into_any_element()
+        }));
         self
     }
 
@@ -726,9 +715,9 @@ where
     D: SearchableListDelegate + 'static,
     <D::Item as SearchableListItem>::Value: PartialEq + Clone,
 {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let disabled = self.options.disabled;
-        let focus_handle = self.state.focus_handle(cx);
+        let focus_handle = self.state.read(cx).state.focus_handle.clone();
         let empty = self.empty;
         let opts = self.options;
 
@@ -750,16 +739,18 @@ where
             }
         });
 
-        div()
-            .id(self.id.clone())
-            .key_context(CONTEXT)
-            .when(!disabled, |this| {
-                this.track_focus(&focus_handle.tab_stop(true))
+        let is_open = self.state.read(cx).state.open;
+        let content_focus_handle = self.state.read(cx).state.list.focus_handle(cx);
+        let open_state = self.state.clone();
+
+        BaseSelect::new(self.id)
+            .open(is_open)
+            .disabled(disabled)
+            .focus_handle(&focus_handle)
+            .content_focus_handle(&content_focus_handle)
+            .on_open_change(move |open, _, cx| {
+                open_state.update(cx, |state, cx| state.set_open(open, cx));
             })
-            .on_action(window.listener_for(&self.state, SelectState::up))
-            .on_action(window.listener_for(&self.state, SelectState::down))
-            .on_action(window.listener_for(&self.state, SelectState::enter))
-            .on_action(window.listener_for(&self.state, SelectState::escape))
             .size_full()
             .child(self.state)
     }
@@ -773,7 +764,7 @@ mod tests {
 
     use crate::{
         IndexPath,
-        searchable_list::SearchableVec,
+        searchable_list::{SearchableListDelegate as _, SearchableVec},
         select::{SelectGroup, SelectState},
     };
 
@@ -808,6 +799,53 @@ mod tests {
 
             assert_eq!(state.read(cx).selected_index(cx), Some(initial));
             assert_eq!(state.read(cx).selected_value(), Some(&"Blueberry"));
+        });
+    }
+
+    #[gpui::test]
+    fn test_select_set_selected_value_clears_search_query(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            let items = SearchableVec::new(vec!["Rust", "Go", "C++"]);
+            let state = cx.new(|cx| SelectState::new(items, None, window, cx).searchable(true));
+            let list = state.read(cx).state.list.clone();
+
+            list.update(cx, |list, cx| list.set_query("Rust", window, cx));
+            assert_eq!(list.read(cx).delegate().delegate.items_count(0), 1);
+
+            state.update(cx, |state, cx| {
+                state.set_selected_value(&"Go", window, cx);
+            });
+
+            assert_eq!(state.read(cx).selected_value(), Some(&"Go"));
+            assert_eq!(state.read(cx).selected_index(cx), Some(IndexPath::new(1)));
+            assert_eq!(list.read(cx).query_input.read(cx).value(), "");
+        });
+    }
+
+    #[gpui::test]
+    fn test_select_set_selected_value_clears_grouped_search_query(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            let mut groups: SearchableVec<SelectGroup<&'static str>> = SearchableVec::new(vec![]);
+            groups.push(SelectGroup::new("A").items(["Apple", "Avocado"]));
+            groups.push(SelectGroup::new("B").items(["Banana", "Blueberry"]));
+
+            let state = cx.new(|cx| SelectState::new(groups, None, window, cx).searchable(true));
+            let list = state.read(cx).state.list.clone();
+
+            list.update(cx, |list, cx| list.set_query("Blue", window, cx));
+            state.update(cx, |state, cx| {
+                state.set_selected_value(&"Banana", window, cx);
+            });
+
+            assert_eq!(state.read(cx).selected_value(), Some(&"Banana"));
+            assert_eq!(
+                state.read(cx).selected_index(cx),
+                Some(IndexPath::new(0).section(1)),
+            );
         });
     }
 }

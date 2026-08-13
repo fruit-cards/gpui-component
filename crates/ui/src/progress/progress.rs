@@ -1,9 +1,9 @@
 use crate::{ActiveTheme, Sizable, Size, StyledExt};
 use gpui::{
-    Animation, AnimationExt as _, App, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement, RenderOnce, StyleRefinement, Styled, Window, div, ease_in_out,
-    prelude::FluentBuilder, px, relative,
+    Animation, AnimationExt as _, App, Background, ElementId, Hsla, IntoElement, ParentElement,
+    RenderOnce, StyleRefinement, Styled, Window, ease_in_out, prelude::FluentBuilder, px, relative,
 };
+use gpui_base::{Progress as BaseProgress, ProgressIndicator, ProgressTrack};
 use instant::Duration;
 
 use super::ProgressState;
@@ -71,7 +71,10 @@ impl Sizable for Progress {
 
 impl RenderOnce for Progress {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let color = self.color.unwrap_or(cx.theme().progress_bar);
+        let bg = self
+            .color
+            .map(Background::from)
+            .unwrap_or(cx.theme().tokens.progress_bar.into());
         let value = self.value;
         let loading = self.loading;
 
@@ -91,21 +94,27 @@ impl RenderOnce for Progress {
         let prev_target = state.read(cx).target();
         let has_changed = prev_target != value;
 
-        div()
-            .id(self.id)
+        BaseProgress::new(self.id)
+            .value(value)
+            .indeterminate(loading)
             .w_full()
             .relative()
             .h(height)
             .rounded(radius)
             .refine_style(&self.style)
-            .bg(color.opacity(0.2))
             .child(
-                div()
+                ProgressTrack::new()
+                    .absolute()
+                    .size_full()
+                    .bg(bg.opacity(0.2)),
+            )
+            .child(
+                ProgressIndicator::new()
                     .absolute()
                     .top_0()
                     .left_0()
                     .h_full()
-                    .bg(color)
+                    .bg(bg)
                     .rounded(radius)
                     .refine_style(&inner_style)
                     .map(|this| match value {

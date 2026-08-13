@@ -2,21 +2,40 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Context, DefiniteLength, Edges, EdgesRefinement, Entity, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Rems, RenderOnce,
-    StyleRefinement, Styled, TextAlign, Window, div, px, relative,
+    AccessibleAction, AnyElement, App, DefiniteLength, Entity, Focusable, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Rems, RenderOnce, Role, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, TextAlign, Window, div, px, relative,
 };
 
+use crate::Root;
 use crate::button::{Button, ButtonVariants as _};
 use crate::input::clear_button;
-use crate::menu::PopupMenu;
+use crate::native_menu::NativeMenu;
 use crate::spinner::Spinner;
 use crate::{ActiveTheme, Colorize, v_flex};
 use crate::{IconName, Size};
-use crate::{Selectable, StyledExt, h_flex};
+use crate::{RoleOverride, Selectable, StyledExt, h_flex};
 use crate::{Sizable, StyleSized};
+use gpui_base::Input as BaseInput;
+use rust_i18n::t;
 
-use super::{InputState, element::EditorScrollbar};
+use super::{InputContentType, InputState, sync_native_content_type};
+
+pub(super) fn sync_focused_input_registry(
+    focused: bool,
+    state: Entity<InputState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    Root::try_update(window, cx, |root, _, cx| {
+        if focused {
+            root.focused_input = Some(state.clone());
+        } else if root.focused_input.as_ref() == Some(&state) {
+            root.focused_input = None;
+        }
+        cx.notify();
+    });
+}
 
 /// Returns `(background, foreground)` colors for input-like components.
 pub(crate) fn input_style(disabled: bool, cx: &App) -> (Hsla, Hsla) {
@@ -47,12 +66,15 @@ pub struct Input {
     focus_bordered: bool,
     tab_index: isize,
     selected: bool,
+    content_type: Option<InputContentType>,
+    role: RoleOverride,
+    accessibility_id: Option<SharedString>,
+    aria_label: Option<SharedString>,
 
     /// An optional context menu builder to allow a custom context menu on the input.
     ///
-    /// If set, this will override the built-in context menu.
-    context_menu_builder:
-        Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
+    /// If set, this overrides the built-in context menu.
+    context_menu_builder: Option<Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>>,
 }
 
 impl Sizable for Input {
@@ -91,8 +113,23 @@ impl Input {
             focus_bordered: true,
             tab_index: 0,
             selected: false,
+            content_type: None,
+            role: RoleOverride::default(),
+            accessibility_id: None,
+            aria_label: None,
             context_menu_builder: None,
         }
+    }
+
+    /// Set the developer-assigned identifier exposed to accessibility clients.
+    pub fn accessibility_id(mut self, id: impl Into<SharedString>) -> Self {
+        self.accessibility_id = Some(id.into());
+        self
+    }
+
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
+        self
     }
 
     pub fn prefix(mut self, prefix: impl IntoElement) -> Self {
@@ -147,6 +184,23 @@ impl Input {
         self
     }
 
+    /// Set the semantic content type for password managers and autofill.
+    ///
+    /// This is a component-level semantic hint. It does not change the text
+    /// value or masked rendering state.
+    pub fn content_type(mut self, content_type: InputContentType) -> Self {
+        self.content_type = Some(content_type);
+        self
+    }
+
+    /// Override the accessible role for the input.
+    ///
+    /// If unset, the role is inferred from multi-line mode and content type.
+    pub fn role(mut self, role: impl Into<RoleOverride>) -> Self {
+        self.role = role.into();
+        self
+    }
+
     /// Set to disable the input field.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
@@ -159,17 +213,19 @@ impl Input {
         self
     }
 
-    /// Sets the context menu for the input.
+    /// Sets a custom context menu builder for the input, shown as a native OS menu.
+    ///
+    /// If set, this overrides the built-in right-click context menu.
     pub fn context_menu(
         mut self,
-        f: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+        f: impl Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu + 'static,
     ) -> Self {
         self.context_menu_builder = Some(Rc::new(f));
         self
     }
 
     fn render_toggle_mask_button(state: &Entity<InputState>, cx: &App) -> impl IntoElement {
-        let masked = state.read(cx).masked;
+        let masked = state.read(cx).presentation().masked;
         Button::new("toggle-mask")
             .icon(if masked {
                 IconName::Eye
@@ -177,60 +233,114 @@ impl Input {
                 IconName::EyeOff
             })
             .xsmall()
-            .ghost()
+            .text()
             .tab_stop(false)
             .on_click({
                 let state = state.clone();
                 move |_, window, cx| {
                     state.update(cx, |state, cx| {
-                        state.set_masked(!state.masked, window, cx);
+                        state.toggle_masked(window, cx);
                     })
                 }
             })
     }
 
+    fn accessibility_role(
+        is_multi_line: bool,
+        content_type: Option<InputContentType>,
+        role: RoleOverride,
+    ) -> Option<Role> {
+        role.resolve(|| {
+            if is_multi_line {
+                return Role::MultilineTextInput;
+            }
+
+            match content_type {
+                None => Role::TextInput,
+                Some(InputContentType::TelephoneNumber) => Role::PhoneNumberInput,
+                Some(InputContentType::EmailAddress) => Role::EmailInput,
+                Some(InputContentType::Url) => Role::UrlInput,
+                Some(InputContentType::Password | InputContentType::NewPassword) => {
+                    Role::PasswordInput
+                }
+                Some(InputContentType::DateTime) => Role::DateTimeInput,
+                Some(InputContentType::Birthdate) => Role::DateInput,
+                Some(
+                    InputContentType::Name
+                    | InputContentType::NamePrefix
+                    | InputContentType::GivenName
+                    | InputContentType::MiddleName
+                    | InputContentType::FamilyName
+                    | InputContentType::NameSuffix
+                    | InputContentType::Nickname
+                    | InputContentType::JobTitle
+                    | InputContentType::OrganizationName
+                    | InputContentType::Location
+                    | InputContentType::FullStreetAddress
+                    | InputContentType::StreetAddressLine1
+                    | InputContentType::StreetAddressLine2
+                    | InputContentType::AddressCity
+                    | InputContentType::AddressState
+                    | InputContentType::AddressCityAndState
+                    | InputContentType::Sublocality
+                    | InputContentType::CountryName
+                    | InputContentType::PostalCode
+                    | InputContentType::CreditCardNumber
+                    | InputContentType::CreditCardName
+                    | InputContentType::CreditCardGivenName
+                    | InputContentType::CreditCardMiddleName
+                    | InputContentType::CreditCardFamilyName
+                    | InputContentType::CreditCardSecurityCode
+                    | InputContentType::CreditCardExpiration
+                    | InputContentType::CreditCardExpirationMonth
+                    | InputContentType::CreditCardExpirationYear
+                    | InputContentType::CreditCardType
+                    | InputContentType::Username
+                    | InputContentType::OneTimeCode
+                    | InputContentType::ShipmentTrackingNumber
+                    | InputContentType::FlightNumber
+                    | InputContentType::BirthdateDay
+                    | InputContentType::BirthdateMonth
+                    | InputContentType::BirthdateYear
+                    | InputContentType::CellularEid
+                    | InputContentType::CellularImei,
+                ) => Role::TextInput,
+            }
+        })
+    }
+
+    fn exposes_accessibility_value(masked: bool, content_type: Option<InputContentType>) -> bool {
+        !masked
+            && !matches!(
+                content_type,
+                Some(InputContentType::Password | InputContentType::NewPassword)
+            )
+    }
+
+    fn handle_accessibility_set_value(
+        state: &Entity<InputState>,
+        data: Option<&gpui::accesskit::ActionData>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(gpui::accesskit::ActionData::Value(value)) = data else {
+            return;
+        };
+        state.update(cx, |state, cx| {
+            state.replace_all(value.to_string(), window, cx);
+        });
+    }
+
     /// This method must after the refine_style.
     fn render_editor(
-        paddings: EdgesRefinement<DefiniteLength>,
         input_state: &Entity<InputState>,
-        state: &InputState,
-        window: &Window,
+        search_panel: Option<AnyElement>,
+        _: &Window,
     ) -> impl IntoElement {
-        let base_size = window.text_style().font_size;
-        let rem_size = window.rem_size();
-
-        let paddings = Edges {
-            left: paddings
-                .left
-                .map(|v| v.to_pixels(base_size, rem_size))
-                .unwrap_or(px(0.)),
-            right: paddings
-                .right
-                .map(|v| v.to_pixels(base_size, rem_size))
-                .unwrap_or(px(0.)),
-            top: paddings
-                .top
-                .map(|v| v.to_pixels(base_size, rem_size))
-                .unwrap_or(px(0.)),
-            bottom: paddings
-                .bottom
-                .map(|v| v.to_pixels(base_size, rem_size))
-                .unwrap_or(px(0.)),
-        };
-
-        state.editor_scrollbar_paddings.set(paddings);
-        state.editor_scrollbar_snapshot.set(None);
-
         v_flex()
             .size_full()
-            .children(state.search_panel.clone())
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .child(input_state.clone())
-                    .child(EditorScrollbar::new(input_state.clone())),
-            )
+            .children(search_panel)
+            .child(div().relative().flex_1().child(input_state.clone()))
     }
 }
 
@@ -244,161 +354,205 @@ impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         const LINE_HEIGHT: Rems = Rems(1.25);
         let text_align = self.style.text.text_align.unwrap_or(TextAlign::Left);
+        sync_focused_input_registry(
+            self.state.read(cx).focus_handle(cx).is_focused(window),
+            self.state.clone(),
+            window,
+            cx,
+        );
 
-        self.state.update(cx, |state, _| {
-            state.context_menu_builder = self.context_menu_builder.clone();
-            state.disabled = self.disabled;
-            state.size = self.size;
-
-            // Only for single line mode
-            if state.mode.is_single_line() {
-                state.text_align = text_align;
-            }
+        self.state.update(cx, |state, cx| {
+            state.ensure_highlighter_factory(crate::highlighter::input_highlighter_factory());
+            state.set_editor_style(gpui_base::input::InputEditorStyle {
+                foreground: cx.theme().foreground,
+                muted_foreground: cx.theme().muted_foreground,
+                background: cx.theme().editor_background(),
+                border: cx.theme().border,
+                selection: cx.theme().selection,
+                caret: cx.theme().caret,
+                diagnostics: gpui_base::input::DiagnosticColors {
+                    error: cx.theme().highlight_theme.style.status.error(cx),
+                    warning: cx.theme().highlight_theme.style.status.warning(cx),
+                    info: cx.theme().highlight_theme.style.status.info(cx),
+                    hint: cx.theme().highlight_theme.style.status.hint(cx),
+                },
+                highlight_styles: cx.theme().highlight_theme.clone(),
+                editor_invisible: cx.theme().highlight_theme.style.editor_invisible,
+                editor_active_line: cx.theme().highlight_theme.style.editor_active_line,
+                editor_gutter_background: cx.theme().highlight_theme.style.editor_gutter_background,
+                fold_icon_renderer: Some(Rc::new(|ix, is_folded| {
+                    Button::new(("fold-icon", ix))
+                        .ghost()
+                        .icon(if is_folded {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .xsmall()
+                        .rounded_xs()
+                        .size(px(14.))
+                        .selected(is_folded)
+                        .into_any_element()
+                })),
+            });
+            state.set_disabled(self.disabled, cx);
+            state.set_text_align(text_align, cx);
+            let custom = self.context_menu_builder.clone();
+            state.on_context_menu(Rc::new(move |_, capabilities, position, window, cx| {
+                let menu = if let Some(custom) = custom.as_ref() {
+                    custom(NativeMenu::new(), window, cx)
+                } else {
+                    let enabled = !capabilities.disabled;
+                    let mut menu = NativeMenu::new();
+                    if capabilities.code_editor {
+                        menu = menu
+                            .menu_with_disabled(
+                                t!("Input.Go to Definition"),
+                                !(enabled && capabilities.go_to_definition),
+                                Box::new(gpui_base::input::GoToDefinition),
+                            )
+                            .menu_with_disabled(
+                                t!("Input.Show Code Actions"),
+                                !(enabled && capabilities.code_actions),
+                                Box::new(gpui_base::input::ToggleCodeActions),
+                            )
+                            .separator();
+                    }
+                    menu.menu_with_disabled(
+                        t!("Input.Cut"),
+                        !(enabled && capabilities.selection),
+                        Box::new(gpui_base::input::Cut),
+                    )
+                    .menu_with_disabled(
+                        t!("Input.Copy"),
+                        !capabilities.selection,
+                        Box::new(gpui_base::input::Copy),
+                    )
+                    .menu_with_disabled(
+                        t!("Input.Paste"),
+                        !(enabled && cx.read_from_clipboard().is_some()),
+                        Box::new(gpui_base::input::Paste),
+                    )
+                    .separator()
+                    .menu(
+                        t!("Input.Select All"),
+                        Box::new(gpui_base::input::SelectAll),
+                    )
+                };
+                menu.show(position, window, cx);
+            }));
         });
+        let overlays = super::overlay::render_overlays(&self.state, window, cx);
 
-        let state = self.state.read(cx);
-        let focused = state.focus_handle.is_focused(window) && !state.disabled;
+        let presentation = self.state.read(cx).presentation();
+        let content_type = self.content_type;
+        let disabled = self.disabled;
+        let is_multi_line = presentation.multi_line;
+        let accessibility_role = Self::accessibility_role(is_multi_line, content_type, self.role);
+        let accessibility_state = self.state.clone();
+        // Materializing the whole rope is only observable through the
+        // accessibility tree, so skip it when no client is listening.
+        let accessibility_value = (window.is_a11y_active()
+            && Self::exposes_accessibility_value(presentation.masked, content_type))
+        .then(|| presentation.value.clone());
+        let focused = presentation.focus_handle.is_focused(window) && !presentation.disabled;
+        if focused {
+            sync_native_content_type(window, content_type, presentation.disabled);
+        }
+
         let gap_x = match self.size {
             Size::Small => px(4.),
             Size::Large => px(8.),
             _ => px(6.),
         };
 
-        let (bg, _) = input_style(state.disabled, cx);
-        let bg = if state.mode.is_code_editor() {
+        let (bg, _) = input_style(presentation.disabled, cx);
+        let bg = if presentation.code_editor {
             cx.theme().editor_background()
         } else {
             bg
         };
-
+        let bg = if presentation.disabled {
+            bg.opacity(0.5)
+        } else {
+            bg
+        };
         let prefix = self.prefix;
         let suffix = self.suffix;
         let show_clear_button = self.cleanable
-            && !state.disabled
-            && !state.loading
-            && state.text.len() > 0
-            && state.mode.is_single_line();
-        let has_suffix = suffix.is_some() || state.loading || self.mask_toggle || show_clear_button;
+            && !presentation.disabled
+            && !presentation.loading
+            && !presentation.value.is_empty()
+            && !presentation.multi_line;
+        let has_suffix =
+            suffix.is_some() || presentation.loading || self.mask_toggle || show_clear_button;
 
-        div()
-            .id(("input", self.state.entity_id()))
+        let placeholder = Some(presentation.placeholder.clone()).filter(|p| !p.is_empty());
+
+        // Don't use a mask-derived placeholder ("(___)___-___") as an aria_label fallback.
+        let placeholder_is_mask =
+            presentation.mask_placeholder.as_deref() == placeholder.as_deref();
+
+        let aria_label = match self.aria_label {
+            Some(label) => Some(label),
+            None if placeholder_is_mask => None,
+            None => placeholder.clone(),
+        };
+
+        BaseInput::new(("input", self.state.entity_id()))
+            .focused(focused)
+            .disabled(disabled)
+            .styles(|styles| {
+                styles.focused(|style| {
+                    style.when(
+                        self.appearance && self.bordered && self.focus_bordered,
+                        |style| style.focused_border(cx),
+                    )
+                })
+            })
+            .role(accessibility_role)
+            .when_some(self.accessibility_id, |this, id| this.accessibility_id(id))
+            .when_some(aria_label, |this, label| this.aria_label(label))
+            .when_some(placeholder, |this, placeholder| {
+                this.aria_placeholder(placeholder)
+            })
+            .when_some(accessibility_value, |this, value| this.aria_value(value))
+            .when(!disabled, |this| {
+                this.on_a11y_action(AccessibleAction::SetValue, move |data, window, cx| {
+                    Self::handle_accessibility_set_value(&accessibility_state, data, window, cx);
+                })
+            })
             .flex()
-            .key_context(crate::input::CONTEXT)
-            .track_focus(&state.focus_handle.clone())
-            .tab_index(self.tab_index)
-            .when(!state.disabled, |this| {
-                this.on_action(window.listener_for(&self.state, InputState::backspace))
-                    .on_action(window.listener_for(&self.state, InputState::delete))
-                    .on_action(
-                        window.listener_for(&self.state, InputState::delete_to_beginning_of_line),
-                    )
-                    .on_action(window.listener_for(&self.state, InputState::delete_to_end_of_line))
-                    .on_action(window.listener_for(&self.state, InputState::delete_previous_word))
-                    .on_action(window.listener_for(&self.state, InputState::delete_next_word))
-                    .on_action(window.listener_for(&self.state, InputState::enter))
-                    .on_action(window.listener_for(&self.state, InputState::escape))
-                    .on_action(window.listener_for(&self.state, InputState::paste))
-                    .on_action(window.listener_for(&self.state, InputState::cut))
-                    .on_action(window.listener_for(&self.state, InputState::undo))
-                    .on_action(window.listener_for(&self.state, InputState::redo))
-                    .when(state.mode.is_multi_line(), |this| {
-                        this.on_action(window.listener_for(&self.state, InputState::indent_inline))
-                            .on_action(window.listener_for(&self.state, InputState::outdent_inline))
-                            .on_action(window.listener_for(&self.state, InputState::indent_block))
-                            .on_action(window.listener_for(&self.state, InputState::outdent_block))
-                    })
-                    .on_action(
-                        window.listener_for(&self.state, InputState::on_action_toggle_code_actions),
-                    )
-            })
-            .on_action(window.listener_for(&self.state, InputState::left))
-            .on_action(window.listener_for(&self.state, InputState::right))
-            .on_action(window.listener_for(&self.state, InputState::select_left))
-            .on_action(window.listener_for(&self.state, InputState::select_right))
-            .when(state.mode.is_multi_line(), |this| {
-                let result = this
-                    .on_action(window.listener_for(&self.state, InputState::up))
-                    .on_action(window.listener_for(&self.state, InputState::down))
-                    .on_action(window.listener_for(&self.state, InputState::select_up))
-                    .on_action(window.listener_for(&self.state, InputState::select_down))
-                    .on_action(window.listener_for(&self.state, InputState::page_up))
-                    .on_action(window.listener_for(&self.state, InputState::page_down));
-
-                let result = result.on_action(
-                    window.listener_for(&self.state, InputState::on_action_go_to_definition),
-                );
-
-                result
-            })
-            .on_action(window.listener_for(&self.state, InputState::select_all))
-            .on_action(window.listener_for(&self.state, InputState::select_to_start_of_line))
-            .on_action(window.listener_for(&self.state, InputState::select_to_end_of_line))
-            .on_action(window.listener_for(&self.state, InputState::select_to_previous_word))
-            .on_action(window.listener_for(&self.state, InputState::select_to_next_word))
-            .on_action(window.listener_for(&self.state, InputState::home))
-            .on_action(window.listener_for(&self.state, InputState::end))
-            .on_action(window.listener_for(&self.state, InputState::move_to_start))
-            .on_action(window.listener_for(&self.state, InputState::move_to_end))
-            .on_action(window.listener_for(&self.state, InputState::move_to_previous_word))
-            .on_action(window.listener_for(&self.state, InputState::move_to_next_word))
-            .on_action(window.listener_for(&self.state, InputState::select_to_start))
-            .on_action(window.listener_for(&self.state, InputState::select_to_end))
-            .on_action(window.listener_for(&self.state, InputState::show_character_palette))
-            .on_action(window.listener_for(&self.state, InputState::copy))
-            .on_action(window.listener_for(&self.state, InputState::on_action_search))
-            .on_key_down(window.listener_for(&self.state, InputState::on_key_down))
-            .on_mouse_down(
-                MouseButton::Left,
-                window.listener_for(&self.state, InputState::on_mouse_down),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                window.listener_for(&self.state, InputState::on_mouse_down),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                window.listener_for(&self.state, InputState::on_mouse_up),
-            )
-            .on_mouse_up(
-                MouseButton::Right,
-                window.listener_for(&self.state, InputState::on_mouse_up),
-            )
-            .on_mouse_move(window.listener_for(&self.state, InputState::on_mouse_move))
-            .on_scroll_wheel(window.listener_for(&self.state, InputState::on_scroll_wheel))
             .size_full()
             .line_height(LINE_HEIGHT)
             .input_px(self.size)
             .input_py(self.size)
             .input_h(self.size)
             .input_text_size(self.size)
-            .when(!self.disabled, |this| this.cursor_text())
             .items_center()
-            .when(state.mode.is_multi_line(), |this| {
+            .when(presentation.multi_line, |this| {
                 this.h_auto()
                     .when_some(self.height, |this, height| this.h(height))
             })
             .when(self.appearance, |this| {
                 this.bg(bg)
-                    .when(self.disabled, |this| this.opacity(0.5))
                     .rounded(cx.theme().radius)
                     .when(self.bordered, |this| {
-                        this.border_color(cx.theme().input)
-                            .border_1()
-                            .when(cx.theme().shadow, |this| this.shadow_xs())
-                            .when(focused && self.focus_bordered, |this| {
-                                this.focused_border(cx)
-                            })
+                        this.border_1().border_color(cx.theme().input)
                     })
             })
             .items_center()
             .gap(gap_x)
             .refine_style(&self.style)
-            .children(prefix)
-            .when(state.mode.is_multi_line(), |mut this| {
-                let paddings = this.style().padding.clone();
-                this.child(Self::render_editor(paddings, &self.state, &state, window))
+            .children(prefix.map(|p| {
+                div()
+                    .when(presentation.disabled, |this| this.opacity(0.5))
+                    .child(p)
+            }))
+            .when(presentation.multi_line, |this| {
+                this.child(Self::render_editor(&self.state, overlays.search, window))
             })
-            .when(!state.mode.is_multi_line(), |this| {
+            .when(!presentation.multi_line, |this| {
                 this.child(self.state.clone())
             })
             .when(has_suffix, |this| {
@@ -407,7 +561,9 @@ impl RenderOnce for Input {
                         .id("suffix")
                         .gap(gap_x)
                         .items_center()
-                        .when(state.loading, |this| {
+                        .cursor_default()
+                        .when(presentation.disabled, |this| this.opacity(0.5))
+                        .when(presentation.loading, |this| {
                             this.child(Spinner::new().color(cx.theme().muted_foreground))
                         })
                         .when(self.mask_toggle, |this| {
@@ -427,5 +583,364 @@ impl RenderOnce for Input {
                         .children(suffix),
                 )
             })
+            .relative()
+            .children(overlays.floating)
+            .render(window, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_types_map_to_accessibility_roles() {
+        let cases = [
+            (None, Role::TextInput),
+            (Some(InputContentType::Name), Role::TextInput),
+            (Some(InputContentType::NamePrefix), Role::TextInput),
+            (Some(InputContentType::GivenName), Role::TextInput),
+            (Some(InputContentType::MiddleName), Role::TextInput),
+            (Some(InputContentType::FamilyName), Role::TextInput),
+            (Some(InputContentType::NameSuffix), Role::TextInput),
+            (Some(InputContentType::Nickname), Role::TextInput),
+            (Some(InputContentType::JobTitle), Role::TextInput),
+            (Some(InputContentType::OrganizationName), Role::TextInput),
+            (Some(InputContentType::Location), Role::TextInput),
+            (Some(InputContentType::FullStreetAddress), Role::TextInput),
+            (Some(InputContentType::StreetAddressLine1), Role::TextInput),
+            (Some(InputContentType::StreetAddressLine2), Role::TextInput),
+            (Some(InputContentType::AddressCity), Role::TextInput),
+            (Some(InputContentType::AddressState), Role::TextInput),
+            (Some(InputContentType::AddressCityAndState), Role::TextInput),
+            (Some(InputContentType::Sublocality), Role::TextInput),
+            (Some(InputContentType::CountryName), Role::TextInput),
+            (Some(InputContentType::PostalCode), Role::TextInput),
+            (
+                Some(InputContentType::TelephoneNumber),
+                Role::PhoneNumberInput,
+            ),
+            (Some(InputContentType::EmailAddress), Role::EmailInput),
+            (Some(InputContentType::Url), Role::UrlInput),
+            (Some(InputContentType::CreditCardNumber), Role::TextInput),
+            (Some(InputContentType::CreditCardName), Role::TextInput),
+            (Some(InputContentType::CreditCardGivenName), Role::TextInput),
+            (
+                Some(InputContentType::CreditCardMiddleName),
+                Role::TextInput,
+            ),
+            (
+                Some(InputContentType::CreditCardFamilyName),
+                Role::TextInput,
+            ),
+            (
+                Some(InputContentType::CreditCardSecurityCode),
+                Role::TextInput,
+            ),
+            (
+                Some(InputContentType::CreditCardExpiration),
+                Role::TextInput,
+            ),
+            (
+                Some(InputContentType::CreditCardExpirationMonth),
+                Role::TextInput,
+            ),
+            (
+                Some(InputContentType::CreditCardExpirationYear),
+                Role::TextInput,
+            ),
+            (Some(InputContentType::CreditCardType), Role::TextInput),
+            (Some(InputContentType::Username), Role::TextInput),
+            (Some(InputContentType::Password), Role::PasswordInput),
+            (Some(InputContentType::NewPassword), Role::PasswordInput),
+            (Some(InputContentType::OneTimeCode), Role::TextInput),
+            (
+                Some(InputContentType::ShipmentTrackingNumber),
+                Role::TextInput,
+            ),
+            (Some(InputContentType::FlightNumber), Role::TextInput),
+            (Some(InputContentType::DateTime), Role::DateTimeInput),
+            (Some(InputContentType::Birthdate), Role::DateInput),
+            (Some(InputContentType::BirthdateDay), Role::TextInput),
+            (Some(InputContentType::BirthdateMonth), Role::TextInput),
+            (Some(InputContentType::BirthdateYear), Role::TextInput),
+            (Some(InputContentType::CellularEid), Role::TextInput),
+            (Some(InputContentType::CellularImei), Role::TextInput),
+        ];
+
+        for (content_type, role) in cases {
+            assert_eq!(
+                Input::accessibility_role(false, content_type, RoleOverride::Implicit),
+                Some(role)
+            );
+        }
+    }
+
+    #[test]
+    fn multiline_inputs_keep_multiline_accessibility_role() {
+        assert_eq!(
+            Input::accessibility_role(
+                true,
+                Some(InputContentType::Password),
+                RoleOverride::Implicit
+            ),
+            Some(Role::MultilineTextInput)
+        );
+    }
+
+    #[test]
+    fn explicit_accessibility_role_overrides_defaults() {
+        assert_eq!(
+            Input::accessibility_role(
+                false,
+                Some(InputContentType::Password),
+                Role::TextInput.into()
+            ),
+            Some(Role::TextInput)
+        );
+        assert_eq!(
+            Input::accessibility_role(
+                true,
+                Some(InputContentType::Password),
+                Role::TextInput.into()
+            ),
+            Some(Role::TextInput)
+        );
+    }
+
+    #[test]
+    fn presentational_role_emits_no_accessibility_node() {
+        assert_eq!(
+            Input::accessibility_role(
+                false,
+                Some(InputContentType::Password),
+                RoleOverride::Presentational
+            ),
+            None
+        );
+        assert_eq!(
+            Input::accessibility_role(true, None, RoleOverride::Presentational),
+            None
+        );
+    }
+
+    #[test]
+    fn role_option_converts_to_the_matching_override() {
+        assert_eq!(
+            RoleOverride::from(Some(Role::Button)),
+            RoleOverride::Role(Role::Button)
+        );
+        assert_eq!(RoleOverride::from(None), RoleOverride::Presentational);
+    }
+
+    #[gpui::test]
+    fn editable_input_offers_accessibility_write_action(cx: &mut gpui::TestAppContext) {
+        use crate::ElementExt as _;
+        use gpui::{AppContext as _, Element as _, IntoElement as _, Render};
+        use std::sync::{Arc, Mutex};
+
+        type EmittedState = Option<(Option<String>, bool)>;
+
+        struct InputA11yProbe {
+            state: Entity<InputState>,
+            emitted: Arc<Mutex<EmittedState>>,
+        }
+
+        impl Render for InputA11yProbe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let state = self.state.clone();
+                let emitted = self.emitted.clone();
+                div().on_prepaint(move |_, window, cx| {
+                    let input = Input::new(&state).render(window, cx).into_element();
+                    let mut node = gpui::accesskit::Node::new(Role::TextInput);
+                    input.write_a11y_info(&mut node);
+                    *emitted.lock().unwrap() = Some((
+                        node.value().map(ToOwned::to_owned),
+                        node.supports_action(AccessibleAction::SetValue),
+                    ));
+                })
+            }
+        }
+
+        cx.update(crate::init);
+        let emitted = Arc::new(Mutex::new(None));
+        let captured = emitted.clone();
+        let (probe, cx) = cx.add_window_view(move |window, cx| InputA11yProbe {
+            state: cx.new(|cx| InputState::new(window, cx).default_value("initial")),
+            emitted,
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        // No assistive technology is attached in tests, so the value stays
+        // unmaterialized while `SetValue` is still advertised.
+        assert_eq!(*captured.lock().unwrap(), Some((None, true)));
+
+        let state = probe.read_with(cx, |probe, _| probe.state.clone());
+        cx.update(|window, cx| {
+            Input::handle_accessibility_set_value(&state, None, window, cx);
+        });
+        assert_eq!(state.read_with(cx, |state, _| state.value()), "initial");
+
+        let action = gpui::accesskit::ActionData::Value("updated".into());
+        cx.update(|window, cx| {
+            Input::handle_accessibility_set_value(&state, Some(&action), window, cx);
+        });
+        assert_eq!(state.read_with(cx, |state, _| state.value()), "updated");
+    }
+
+    #[gpui::test]
+    fn input_emits_accessibility_id(cx: &mut gpui::TestAppContext) {
+        use crate::ElementExt as _;
+        use gpui::{AppContext as _, Element as _, IntoElement as _, Render};
+        use std::sync::{Arc, Mutex};
+
+        type EmittedIds = Vec<Option<String>>;
+
+        struct InputA11yProbe {
+            state: Entity<InputState>,
+            emitted: Arc<Mutex<EmittedIds>>,
+        }
+
+        impl Render for InputA11yProbe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let state = self.state.clone();
+                let emitted = self.emitted.clone();
+                div().on_prepaint(move |_, window, cx| {
+                    let mut author_id_of = |input: Input| {
+                        let mut node = gpui::accesskit::Node::new(Role::TextInput);
+                        input
+                            .render(window, cx)
+                            .into_element()
+                            .write_a11y_info(&mut node);
+                        node.author_id().map(ToOwned::to_owned)
+                    };
+
+                    *emitted.lock().unwrap() = vec![
+                        author_id_of(Input::new(&state)),
+                        author_id_of(Input::new(&state).accessibility_id("search.query")),
+                    ];
+                })
+            }
+        }
+
+        cx.update(crate::init);
+        let emitted = Arc::new(Mutex::new(Vec::new()));
+        let captured = emitted.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| InputA11yProbe {
+            state: cx.new(|cx| InputState::new(window, cx)),
+            emitted,
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec![None, Some("search.query".into())]
+        );
+    }
+
+    #[test]
+    fn accessibility_value_is_hidden_for_secret_inputs() {
+        assert!(Input::exposes_accessibility_value(false, None));
+        assert!(!Input::exposes_accessibility_value(true, None));
+        assert!(!Input::exposes_accessibility_value(
+            false,
+            Some(InputContentType::Password)
+        ));
+        assert!(!Input::exposes_accessibility_value(
+            false,
+            Some(InputContentType::NewPassword)
+        ));
+    }
+
+    #[gpui::test]
+    fn focused_input_registry_tracks_focus_and_blur(cx: &mut gpui::TestAppContext) {
+        use crate::WindowExt as _;
+        use gpui::{AppContext as _, Render};
+
+        struct Probe {
+            input: Entity<InputState>,
+            otp: Entity<gpui_base::OtpState>,
+            other: gpui::FocusHandle,
+        }
+        impl Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div()
+                    .child(div().track_focus(&self.other))
+                    .child(Input::new(&self.input))
+                    .child(crate::input::OtpInput::new(&self.otp))
+            }
+        }
+
+        cx.update(crate::init);
+        let mut input = None;
+        let mut other_focus = None;
+        let mut otp = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                let state = cx.new(|cx| InputState::new(window, cx));
+                let otp_state = cx.new(|cx| gpui_base::OtpState::new(6, window, cx));
+                input = Some(state.clone());
+                otp = Some(otp_state.clone());
+                let other = cx.focus_handle();
+                other_focus = Some(other.clone());
+                let probe = cx.new(|_| Probe {
+                    input: state,
+                    otp: otp_state,
+                    other,
+                });
+                cx.new(|cx| Root::new(probe, window, cx))
+            })
+            .unwrap()
+        });
+        let input = input.unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|window, cx| input.update(cx, |state, cx| state.focus(window, cx)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.update(|window, cx| window.focused_input(cx)),
+            Some(input.clone())
+        );
+        cx.update(|window, cx| other_focus.clone().unwrap().focus(window, cx));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(cx.update(|window, cx| window.focused_input(cx)), None);
+
+        let otp = otp.unwrap();
+        let compat = otp.read_with(&cx, |state, _| state.compat_input_state());
+        cx.update(|window, cx| otp.update(cx, |state, cx| state.focus(window, cx)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.update(|window, cx| window.focused_input(cx)),
+            Some(compat)
+        );
+        cx.update(|window, cx| other_focus.unwrap().focus(window, cx));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(cx.update(|window, cx| window.focused_input(cx)), None);
     }
 }

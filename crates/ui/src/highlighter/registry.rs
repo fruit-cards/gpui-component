@@ -60,7 +60,7 @@ pub(super) const HIGHLIGHT_NAMES: [&str; 41] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageConfig {
     pub name: SharedString,
-    pub language: tree_sitter::Language,
+    pub language: Option<tree_sitter::Language>,
     pub injection_languages: Vec<SharedString>,
     pub highlights: SharedString,
     pub injections: SharedString,
@@ -78,12 +78,29 @@ impl LanguageConfig {
     ) -> Self {
         Self {
             name: name.into(),
-            language,
+            language: Some(language),
             injection_languages,
             highlights: SharedString::from(highlights.to_string()),
             injections: SharedString::from(injections.to_string()),
             locals: SharedString::from(locals.to_string()),
         }
+    }
+
+    /// A plain text language without a grammar, it will never be parsed.
+    pub fn plain(name: impl Into<SharedString>) -> Self {
+        Self {
+            name: name.into(),
+            language: None,
+            injection_languages: vec![],
+            highlights: SharedString::default(),
+            injections: SharedString::default(),
+            locals: SharedString::default(),
+        }
+    }
+
+    /// Whether this language has a grammar to parse with.
+    pub fn has_grammar(&self) -> bool {
+        self.language.is_some()
     }
 }
 
@@ -427,6 +444,10 @@ pub struct HighlightThemeStyle {
     pub editor_active_line_number: Option<Hsla>,
     #[serde(rename = "editor.invisible")]
     pub editor_invisible: Option<Hsla>,
+    /// Optional background color for the gutter (line-number column).
+    /// Falls back to [`Self::editor_background`] when unset.
+    #[serde(rename = "editor.gutter.background")]
+    pub editor_gutter_background: Option<Hsla>,
     #[serde(flatten)]
     pub status: StatusColors,
     #[serde(rename = "syntax")]
@@ -461,6 +482,12 @@ impl HighlightTheme {
 
     pub fn default_light() -> Arc<Self> {
         DEFAULT_THEME_COLORS[&ThemeMode::Light].1.clone()
+    }
+}
+
+impl gpui_base::input::HighlightStyleResolver for HighlightTheme {
+    fn style(&self, name: &str) -> Option<HighlightStyle> {
+        self.style.syntax.style(name)
     }
 }
 
