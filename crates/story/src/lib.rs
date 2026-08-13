@@ -13,7 +13,7 @@ use gpui_component::{
     h_flex,
     menu::PopupMenu,
     notification::Notification,
-    scroll::{ScrollableElement as _, ScrollbarShow},
+    scroll::{ScrollableElement as _, ScrollbarMode},
     text::markdown,
     v_flex,
 };
@@ -29,9 +29,11 @@ pub use crate::title_bar::AppTitleBar;
 pub use gallery::Gallery;
 pub use stories::*;
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = story, no_json)]
-pub struct SelectScrollbarShow(ScrollbarShow);
+pub struct SelectScrollbarMode(ScrollbarMode);
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = story, no_json)]
@@ -111,7 +113,6 @@ pub fn create_new_window_with_size<F, E>(
     cx.spawn(async move |cx| {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(window_bounds)),
-            titlebar: Some(TitleBar::title_bar_options()),
             window_min_size: Some(gpui::Size {
                 width: px(480.),
                 height: px(320.),
@@ -121,7 +122,7 @@ pub fn create_new_window_with_size<F, E>(
             window_background: gpui::WindowBackgroundAppearance::Transparent,
             #[cfg(target_os = "linux")]
             window_decorations: Some(gpui::WindowDecorations::Client),
-            ..Default::default()
+            ..TitleBar::window_options()
         };
 
         let window = cx
@@ -180,6 +181,7 @@ pub fn init(cx: &mut App) {
             .try_init();
     }
 
+    rust_i18n::extend!(gpui_component);
     gpui_component::init(cx);
     AppState::init(cx);
     themes::init(cx);
@@ -189,17 +191,6 @@ pub fn init(cx: &mut App) {
     {
         let http_client =
             reqwest_client::ReqwestClient::user_agent("gpui-component/story").unwrap();
-        cx.set_http_client(std::sync::Arc::new(http_client));
-    }
-
-    #[cfg(target_family = "wasm")]
-    {
-        // Safety: the web examples run single-threaded; the client is
-        // created and used exclusively on the main thread.
-        let http_client = unsafe {
-            gpui_web::FetchHttpClient::with_user_agent("gpui-component/story")
-                .expect("failed to create FetchHttpClient")
-        };
         cx.set_http_client(std::sync::Arc::new(http_client));
     }
 
@@ -633,6 +624,7 @@ pub struct StoryRoot {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) title_bar: Entity<AppTitleBar>,
     pub(crate) view: AnyView,
+    pub(crate) embedded: bool,
 }
 
 impl StoryRoot {
@@ -647,6 +639,17 @@ impl StoryRoot {
             focus_handle: cx.focus_handle(),
             title_bar,
             view: view.into(),
+            embedded: false,
+        }
+    }
+
+    pub fn embedded(view: impl Into<AnyView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let title_bar = cx.new(|cx| AppTitleBar::new("", window, cx));
+        Self {
+            focus_handle: cx.focus_handle(),
+            title_bar,
+            view: view.into(),
+            embedded: true,
         }
     }
 
@@ -702,7 +705,7 @@ impl Render for StoryRoot {
             .child(
                 v_flex()
                     .size_full()
-                    .child(self.title_bar.clone())
+                    .when(!self.embedded, |this| this.child(self.title_bar.clone()))
                     .child(
                         div()
                             .track_focus(&self.focus_handle)
@@ -714,5 +717,22 @@ impl Render for StoryRoot {
                     .children(dialog_layer)
                     .children(notification_layer),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn extends_component_translations_with_story_locales() {
+        rust_i18n::extend!(gpui_component);
+
+        assert_eq!(
+            gpui_component::_rust_i18n_try_translate("fr", "Calendar.month.January"),
+            Some("Janvier".into())
+        );
+        assert_eq!(
+            gpui_component::_rust_i18n_try_translate("en", "Calendar.month.January"),
+            Some("January".into())
+        );
     }
 }

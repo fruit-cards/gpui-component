@@ -1,9 +1,13 @@
 use gpui::{prelude::*, *};
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, h_flex,
+    Icon, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     input::{Input, InputEvent, InputState},
     resizable::{h_resizable, resizable_panel},
+    separator::Separator,
     sidebar::{Sidebar, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem},
+    status_bar::StatusBar,
     v_flex,
 };
 
@@ -14,12 +18,22 @@ pub struct Gallery {
     active_group_index: Option<usize>,
     active_index: Option<usize>,
     collapsed: bool,
+    embedded: bool,
     search_input: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Gallery {
     pub fn new(init_story: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_mode(init_story, false, window, cx)
+    }
+
+    fn new_with_mode(
+        init_story: Option<&str>,
+        embedded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search..."));
         let _subscriptions = vec![cx.subscribe(&search_input, |this, _, e, cx| match e {
             InputEvent::Change => {
@@ -66,6 +80,7 @@ impl Gallery {
                     StoryContainer::panel::<LabelStory>(window, cx),
                     StoryContainer::panel::<ListStory>(window, cx),
                     StoryContainer::panel::<MenuStory>(window, cx),
+                    StoryContainer::panel::<NativeMenuStory>(window, cx),
                     StoryContainer::panel::<NotificationStory>(window, cx),
                     StoryContainer::panel::<NumberInputStory>(window, cx),
                     StoryContainer::panel::<OtpInputStory>(window, cx),
@@ -84,6 +99,7 @@ impl Gallery {
                     StoryContainer::panel::<SkeletonStory>(window, cx),
                     StoryContainer::panel::<SliderStory>(window, cx),
                     StoryContainer::panel::<SpinnerStory>(window, cx),
+                    StoryContainer::panel::<StatusBarStory>(window, cx),
                     StoryContainer::panel::<StepperStory>(window, cx),
                     StoryContainer::panel::<SwitchStory>(window, cx),
                     StoryContainer::panel::<DataTableStory>(window, cx),
@@ -106,6 +122,7 @@ impl Gallery {
             active_group_index: Some(0),
             active_index: Some(0),
             collapsed: false,
+            embedded,
             _subscriptions,
         };
 
@@ -117,14 +134,32 @@ impl Gallery {
     }
 
     fn set_active_story(&mut self, name: &str, window: &mut Window, cx: &mut App) {
-        let name = name.to_string();
+        let name = name.trim().to_string();
+        let exact_index = self
+            .stories
+            .iter()
+            .flat_map(|(_, stories)| stories)
+            .filter(|story| {
+                story
+                    .read(cx)
+                    .name
+                    .to_lowercase()
+                    .contains(&name.to_lowercase())
+            })
+            .position(|story| story.read(cx).name.eq_ignore_ascii_case(&name));
         self.search_input.update(cx, |this, cx| {
             this.set_value(&name, window, cx);
-        })
+        });
+        self.active_group_index = Some(0);
+        self.active_index = Some(exact_index.unwrap_or(0));
     }
 
     pub fn view(init_story: Option<&str>, window: &mut Window, cx: &mut App) -> Entity<Self> {
         cx.new(|cx| Self::new(init_story, window, cx))
+    }
+
+    pub fn embedded_view(story: &str, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        cx.new(|cx| Self::new_with_mode(Some(story), true, window, cx))
     }
 }
 
@@ -162,7 +197,18 @@ impl Render for Gallery {
                 ("".into(), "".into())
             };
 
-        h_resizable("gallery-container")
+        let current_story = story_name.clone();
+        let total_components: usize = self.stories.iter().map(|(_, items)| items.len()).sum();
+
+        if self.embedded {
+            return div()
+                .id("embedded-story")
+                .size_full()
+                .when_some(active_story, |this, story| this.child(story.clone()))
+                .into_any_element();
+        }
+
+        let body = h_resizable("gallery-container")
             .child(
                 resizable_panel()
                     .size(px(255.))
@@ -300,6 +346,32 @@ impl Render for Gallery {
                             }),
                     )
                     .into_any_element(),
+            );
+
+        v_flex()
+            .size_full()
+            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                StatusBar::new()
+                    .child(Icon::new(IconName::GalleryVerticalEnd).xsmall())
+                    .child(format!("{total_components} components"))
+                    .child(Separator::vertical())
+                    .when(!current_story.is_empty(), |this| {
+                        this.child(current_story.clone())
+                    })
+                    .right(cx.theme().theme_name().clone())
+                    .right(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    .right(
+                        Button::new("assistant")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Github)
+                            .tooltip("GPUI Component GitHub repository")
+                            .on_click(|_, _, cx| {
+                                cx.open_url("https://github.com/longbridge/gpui-component")
+                            }),
+                    ),
             )
+            .into_any_element()
     }
 }

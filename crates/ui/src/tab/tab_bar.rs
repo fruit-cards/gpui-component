@@ -1,9 +1,9 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, Bounds, Div, Edges, ElementId,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, Background, Bounds, Edges, ElementId,
     InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use rust_i18n::t;
@@ -14,7 +14,8 @@ use crate::animation::{Lerp, ease_in_out_cubic};
 use crate::button::{Button, ButtonVariants as _};
 use crate::menu::{DropdownMenu as _, PopupMenuItem};
 use crate::{
-    ActiveTheme, ElementExt, Icon, IconName, Selectable, Sizable, Size, StyledExt, h_flex,
+    ActiveTheme, ElementExt, Icon, InteractiveElementExt as _, Selectable, Sizable, Size,
+    StyledExt, h_flex,
 };
 
 struct TabIndicatorBounds {
@@ -39,7 +40,7 @@ impl TabIndicatorBounds {
 #[derive(IntoElement)]
 pub struct TabBar {
     id: ElementId,
-    base: Stateful<Div>,
+    base: gpui_base::Tabs,
     style: StyleRefinement,
     scroll_handle: Option<ScrollHandle>,
     prefix: Option<AnyElement>,
@@ -59,7 +60,7 @@ impl TabBar {
         let id = id.into();
         Self {
             id: id.clone(),
-            base: div().id(id).px(px(-1.)),
+            base: gpui_base::Tabs::new(id).px(px(-1.)),
             style: StyleRefinement::default(),
             children: SmallVec::new(),
             scroll_handle: None,
@@ -164,12 +165,17 @@ impl TabBar {
     }
 
     /// Render the sliding indicator element for animated tab switching.
+    ///
+    /// Returns the indicator element together with the current animation
+    /// `epoch`, which increments on every tab switch. Tabs key their own
+    /// transitions (e.g. text color fade) on this epoch so they restart in sync
+    /// with the indicator slide.
     fn render_indicator(
         &self,
         bounds_rc: &Option<Rc<RefCell<TabIndicatorBounds>>>,
         window: &mut Window,
         cx: &mut App,
-    ) -> Option<AnyElement> {
+    ) -> Option<(AnyElement, u64)> {
         let has_indicator = matches!(
             self.variant,
             TabVariant::Segmented | TabVariant::Pill | TabVariant::Underline
@@ -217,14 +223,16 @@ impl TabBar {
                     div()
                         .w_full()
                         .h(inner_height)
-                        .bg(cx.theme().background)
+                        .bg(cx.theme().tokens.background)
                         .rounded(inner_radius)
-                        .shadow_xs(),
+                        .shadow_sm(),
                 ),
-                TabVariant::Pill => el
-                    .flex()
-                    .items_center()
-                    .child(div().size_full().bg(cx.theme().primary).rounded(px(99.))),
+                TabVariant::Pill => el.flex().items_center().child(
+                    div()
+                        .size_full()
+                        .bg(cx.theme().tokens.primary)
+                        .rounded(px(99.)),
+                ),
                 TabVariant::Underline => el.child(
                     div()
                         .absolute()
@@ -232,7 +240,7 @@ impl TabBar {
                         .right_0()
                         .bottom_0()
                         .h(px(2.))
-                        .bg(cx.theme().primary),
+                        .bg(cx.theme().tokens.primary),
                 ),
                 _ => el,
             })
@@ -246,7 +254,7 @@ impl TabBar {
                 },
             );
 
-        Some(indicator.into_any_element())
+        Some((indicator.into_any_element(), epoch))
     }
 
     /// Update animation parameters based on current and previous selection.
@@ -337,18 +345,18 @@ impl RenderOnce for TabBar {
             Size::Large => px(16.),
             _ => px(12.),
         };
-        let (bg, paddings, gap) = match self.variant {
+        let (bg, paddings, gap): (Background, _, _) = match self.variant {
             TabVariant::Tab => {
                 let padding = Edges::all(px(0.));
-                (cx.theme().tab_bar, padding, px(0.))
+                (cx.theme().tokens.tab_bar.into(), padding, px(0.))
             }
             TabVariant::Outline => {
                 let padding = Edges::all(px(0.));
-                (cx.theme().transparent, padding, default_gap)
+                (cx.theme().transparent.into(), padding, default_gap)
             }
             TabVariant::Pill => {
                 let padding = Edges::all(px(0.));
-                (cx.theme().transparent, padding, px(4.))
+                (cx.theme().transparent.into(), padding, px(4.))
             }
             TabVariant::Segmented => {
                 let padding_x = match self.size {
@@ -362,7 +370,7 @@ impl RenderOnce for TabBar {
                     ..Default::default()
                 };
 
-                (cx.theme().tab_bar_segmented, padding, px(2.))
+                (cx.theme().tokens.tab_bar_segmented.into(), padding, px(2.))
             }
             TabVariant::Underline => {
                 // This gap is same as the tab inner_paddings
@@ -373,7 +381,7 @@ impl RenderOnce for TabBar {
                     _ => px(16.),
                 };
 
-                (cx.theme().transparent, Edges::all(px(0.)), gap)
+                (cx.theme().transparent.into(), Edges::all(px(0.)), gap)
             }
         };
 
@@ -398,16 +406,54 @@ impl RenderOnce for TabBar {
             None
         };
 
-        let indicator_element = self.render_indicator(&bounds_rc, window, cx);
+        let indicator = self.render_indicator(&bounds_rc, window, cx);
+        let indicator_epoch = indicator.as_ref().map(|(_, epoch)| *epoch).unwrap_or(0);
+        let indicator_element = indicator.map(|(el, _)| el);
         let indicator_ready = indicator_element.is_some();
 
         let has_suffix_or_menu = self.suffix.is_some() || self.menu;
         let mut item_metas: Vec<(Option<SharedString>, Option<Icon>, bool)> = Vec::new();
         let selected_index = self.selected_index;
         let on_click = self.on_click.clone();
+        let tabs = self.base;
+        let mut rendered_tabs = Vec::with_capacity(self.children.len());
 
-        self.base
-            .group("tab-bar")
+        for (ix, child) in self.children.into_iter().enumerate() {
+            item_metas.push((child.label.clone(), child.icon.clone(), child.disabled));
+            let tab_bar_prefix = child.tab_bar_prefix.unwrap_or(true);
+            let mut tab = child
+                .ix(ix)
+                .tab_bar_prefix(tab_bar_prefix)
+                .with_variant(self.variant)
+                .with_size(self.size);
+            tab.indicator_active = has_indicator;
+            tab.indicator_ready = indicator_ready;
+            tab.indicator_epoch = indicator_epoch;
+            let tab = tab
+                .when_some(selected_index, |tab, selected_index| {
+                    tab.selected(selected_index == ix)
+                })
+                .when_some(self.on_click.clone(), move |tab, on_click| {
+                    tab.on_click(move |_, window, cx| on_click(&ix, window, cx))
+                });
+
+            rendered_tabs.push(if let Some(ref rc) = bounds_rc {
+                let rc = rc.clone();
+                div()
+                    .flex_shrink_0()
+                    .on_prepaint(move |bounds, _, _| {
+                        if let Some(slot) = rc.borrow_mut().tabs.get_mut(ix) {
+                            *slot = bounds;
+                        }
+                    })
+                    .child(tab)
+                    .into_any_element()
+            } else {
+                tab.into_any_element()
+            });
+        }
+
+        tabs.group("tab-bar")
             .relative()
             .flex()
             .items_center()
@@ -439,6 +485,7 @@ impl RenderOnce for TabBar {
                         .relative()
                         .gap(gap)
                         .overflow_x_scroll()
+                        .lock_scroll_axis()
                         .when_some(self.scroll_handle, |this, scroll_handle| {
                             this.track_scroll(&scroll_handle)
                         })
@@ -448,42 +495,7 @@ impl RenderOnce for TabBar {
                             })
                         })
                         .when_some(indicator_element, |this, ind| this.child(ind))
-                        .children(self.children.into_iter().enumerate().map(|(ix, child)| {
-                            item_metas.push((
-                                child.label.clone(),
-                                child.icon.clone(),
-                                child.disabled,
-                            ));
-                            let tab_bar_prefix = child.tab_bar_prefix.unwrap_or(true);
-                            let mut tab = child
-                                .ix(ix)
-                                .tab_bar_prefix(tab_bar_prefix)
-                                .with_variant(self.variant)
-                                .with_size(self.size);
-                            tab.indicator_active = has_indicator;
-                            tab.indicator_ready = indicator_ready;
-                            let tab = tab
-                                .when_some(self.selected_index, |this, selected_ix| {
-                                    this.selected(selected_ix == ix)
-                                })
-                                .when_some(self.on_click.clone(), move |this, on_click| {
-                                    this.on_click(move |_, window, cx| on_click(&ix, window, cx))
-                                });
-
-                            if let Some(ref rc) = bounds_rc {
-                                let rc = rc.clone();
-                                div()
-                                    .on_prepaint(move |bounds, _, _| {
-                                        if let Some(slot) = rc.borrow_mut().tabs.get_mut(ix) {
-                                            *slot = bounds;
-                                        }
-                                    })
-                                    .child(tab)
-                                    .into_any_element()
-                            } else {
-                                tab.into_any_element()
-                            }
-                        }))
+                        .children(rendered_tabs)
                         .when(has_suffix_or_menu, |this| this.child(self.last_empty_space)),
                 ),
             )
@@ -492,7 +504,7 @@ impl RenderOnce for TabBar {
                     Button::new("more")
                         .xsmall()
                         .ghost()
-                        .icon(IconName::ChevronDown)
+                        .dropdown_caret(true)
                         .dropdown_menu(move |mut this, _, _| {
                             this = this.scrollable(true);
                             for (ix, (label, icon, disabled)) in item_metas.iter().enumerate() {
@@ -520,5 +532,122 @@ impl RenderOnce for TabBar {
                 )
             })
             .when_some(self.suffix, |this, suffix| this.child(suffix))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{Context, Modifiers, Render, TestAppContext};
+
+    use super::*;
+
+    struct Harness {
+        group_handler: bool,
+        disabled: bool,
+        child_clicks: Rc<Cell<usize>>,
+        group_clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let child_clicks = self.child_clicks.clone();
+            let group_clicks = self.group_clicks.clone();
+            TabBar::new("tabs")
+                .w(px(240.))
+                .child(
+                    Tab::new()
+                        .debug_selector(|| "first-tab".into())
+                        .disabled(self.disabled)
+                        .label("First")
+                        .on_click(move |_, _, _| child_clicks.set(child_clicks.get() + 1)),
+                )
+                .when(self.group_handler, |tabs| {
+                    tabs.on_click(move |ix, _, _| group_clicks.set(*ix + 1))
+                })
+        }
+    }
+
+    fn harness(
+        cx: &mut TestAppContext,
+        group_handler: bool,
+        disabled: bool,
+    ) -> (
+        &mut gpui::VisualTestContext,
+        Rc<Cell<usize>>,
+        Rc<Cell<usize>>,
+    ) {
+        cx.update(crate::theme::init);
+        let child_clicks = Rc::new(Cell::new(0));
+        let group_clicks = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let child_clicks = child_clicks.clone();
+            let group_clicks = group_clicks.clone();
+            move |_, _| Harness {
+                group_handler,
+                disabled,
+                child_clicks,
+                group_clicks,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        (cx, child_clicks, group_clicks)
+    }
+
+    #[gpui::test]
+    fn group_callback_overrides_child_callback(cx: &mut TestAppContext) {
+        let (cx, child_clicks, group_clicks) = harness(cx, true, false);
+        let position = cx.debug_bounds("first-tab").unwrap().center();
+        cx.simulate_click(position, Modifiers::default());
+        assert_eq!(child_clicks.get(), 0);
+        assert_eq!(group_clicks.get(), 1);
+    }
+
+    #[gpui::test]
+    fn child_callback_is_preserved_without_group_callback(cx: &mut TestAppContext) {
+        let (cx, child_clicks, group_clicks) = harness(cx, false, false);
+        let position = cx.debug_bounds("first-tab").unwrap().center();
+        cx.simulate_click(position, Modifiers::default());
+        assert_eq!(child_clicks.get(), 1);
+        assert_eq!(group_clicks.get(), 0);
+    }
+
+    #[gpui::test]
+    fn disabled_tab_suppresses_child_and_group_callbacks(cx: &mut TestAppContext) {
+        let (cx, child_clicks, group_clicks) = harness(cx, true, true);
+        let position = cx.debug_bounds("first-tab").unwrap().center();
+        cx.simulate_click(position, Modifiers::default());
+        assert_eq!(child_clicks.get(), 0);
+        assert_eq!(group_clicks.get(), 0);
+    }
+
+    struct ContentHarness;
+
+    impl Render for ContentHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            TabBar::new("content-tabs").w(px(320.)).child(
+                Tab::new()
+                    .prefix(div().debug_selector(|| "tab-prefix".into()).child("P"))
+                    .child(div().debug_selector(|| "tab-child".into()).child("Content"))
+                    .suffix(div().debug_selector(|| "tab-suffix".into()).child("S")),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn prefix_content_and_suffix_keep_their_order(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| ContentHarness);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let prefix = cx.debug_bounds("tab-prefix").unwrap();
+        let child = cx.debug_bounds("tab-child").unwrap();
+        let suffix = cx.debug_bounds("tab-suffix").unwrap();
+        assert!(prefix.origin.x < child.origin.x);
+        assert!(child.origin.x < suffix.origin.x);
+        assert!(prefix.size.width > px(0.));
+        assert!(child.size.width > px(0.));
+        assert!(suffix.size.width > px(0.));
     }
 }

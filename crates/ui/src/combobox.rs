@@ -1,19 +1,18 @@
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DismissEvent, Edges, ElementId, Entity,
-    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement, KeyBinding,
-    Length, MouseDownEvent, ParentElement, Pixels, Render, RenderOnce, SharedString,
+    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement, Length,
+    MouseDownEvent, ParentElement, Pixels, Render, RenderOnce, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, anchored, deferred, div,
     prelude::FluentBuilder, px, rems,
 };
 
 use rust_i18n::t;
 
+pub use crate::select::Caret;
+
 use crate::{
     ActiveTheme, Disableable, ElementExt as _, Icon, IconName, IndexPath, Sizable, Size,
-    StyleSized, StyledExt,
-    actions::{Cancel, Confirm, SelectDown, SelectUp},
-    global_state::GlobalState,
-    h_flex,
+    StyleSized, StyledExt, h_flex,
     input::{clear_button, input_style},
     list::{List, ListState},
     searchable_list::{
@@ -22,22 +21,7 @@ use crate::{
     },
     v_flex,
 };
-
-const CONTEXT: &str = "Combobox";
-
-pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("up", SelectUp, Some(CONTEXT)),
-        KeyBinding::new("down", SelectDown, Some(CONTEXT)),
-        KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
-        KeyBinding::new(
-            "secondary-enter",
-            Confirm { secondary: true },
-            Some(CONTEXT),
-        ),
-        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
-    ])
-}
+use gpui_base::{Combobox as BaseCombobox, GlobalState};
 
 // MARK: ComboboxTriggerCtx
 
@@ -289,6 +273,30 @@ where
         self.state.selection()
     }
 
+    /// Replace the entire selection set by item values.
+    ///
+    /// Values are resolved through the current delegate. Values that cannot be resolved are
+    /// ignored. This updates the committed selection and snapshot without emitting a
+    /// [`ComboboxEvent`].
+    pub fn set_selected_values(
+        &mut self,
+        values: &[<D::Item as SearchableListItem>::Value],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected_indices = {
+            let list = self.state.list.read(cx);
+            let delegate = &list.delegate().delegate;
+
+            values
+                .iter()
+                .filter_map(|value| delegate.position(value))
+                .collect::<Vec<_>>()
+        };
+
+        self.set_selected_indices(selected_indices, window, cx);
+    }
+
     /// Replace the entire selection set.
     pub fn set_selected_indices(
         &mut self,
@@ -438,35 +446,6 @@ where
         cx.notify();
     }
 
-    fn up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.state.open {
-            self.set_open(true, cx);
-        }
-
-        self.state.list.focus_handle(cx).focus(window, cx);
-        cx.propagate();
-    }
-
-    fn down(&mut self, _: &SelectDown, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.state.open {
-            self.set_open(true, cx);
-        }
-
-        self.state.list.focus_handle(cx).focus(window, cx);
-        cx.propagate();
-    }
-
-    fn enter(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        cx.propagate();
-
-        if !self.state.open {
-            self.set_open(true, cx);
-            cx.notify();
-        }
-
-        self.state.list.focus_handle(cx).focus(window, cx);
-    }
-
     fn toggle_menu(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
 
@@ -474,14 +453,21 @@ where
 
         if self.state.open {
             self.state.list.focus_handle(cx).focus(window, cx);
+        } else {
+            cx.emit(ComboboxEvent::Confirm(self.selected_values()));
+            self.focus(window, cx);
         }
 
         cx.notify();
     }
 
-    fn escape(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.state.open {
-            cx.propagate();
+    /// Close the menu when a press lands outside the popup.
+    ///
+    /// A press on the trigger is left to propagate: swallowing it here would keep nested
+    /// controls (a tag remove button, the clear button) from ever seeing the press, and
+    /// `toggle_menu` closes the menu on release anyway.
+    fn dismiss(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.state.open || self.state.bounds.contains(&event.position) {
             return;
         }
 
@@ -497,9 +483,9 @@ where
         self.state.open = open;
 
         if self.state.open {
-            GlobalState::global_mut(cx).register_deferred_popover(&self.state.focus_handle)
+            GlobalState::register_deferred_popover(&self.state.focus_handle, cx)
         } else {
-            GlobalState::global_mut(cx).unregister_deferred_popover(&self.state.focus_handle)
+            GlobalState::unregister_deferred_popover(&self.state.focus_handle, cx)
         }
 
         cx.notify();
@@ -568,7 +554,7 @@ where
         let is_focused = self.state.focus_handle.is_focused(window);
         let show_clean = self.state.cleanable && !self.state.selection.is_empty();
         let bounds = self.state.bounds;
-        let allow_open = !(self.state.open || self.state.disabled);
+        let allow_open = !self.state.disabled;
         let outline_visible = self.state.open || (is_focused && !self.state.disabled);
         let disabled = self.state.disabled;
 
@@ -585,11 +571,6 @@ where
         let open = self.state.open;
         let size = self.state.size;
         let has_custom_trigger = self.render_trigger.is_some();
-
-        let trigger_icon = self
-            .trigger_icon
-            .clone()
-            .unwrap_or_else(|| Icon::new(IconName::ChevronDown));
 
         let trigger_body = if let Some(render_trigger) = &self.render_trigger {
             let ctx = ComboboxTriggerCtx {
@@ -617,9 +598,12 @@ where
                     }
                 })
                 .into_any_element()
+        } else if let Some(icon) = self.trigger_icon.clone() {
+            icon.xsmall()
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
         } else {
-            trigger_icon
-                .xsmall()
+            Caret::new(size)
                 .text_color(cx.theme().muted_foreground)
                 .into_any_element()
         };
@@ -639,7 +623,7 @@ where
         let footer_el = self.footer.as_ref().map(|f| f(window, cx));
 
         let dismiss_handler: Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static> =
-            Box::new(cx.listener(|this, _, window, cx| this.escape(&Cancel, window, cx)));
+            Box::new(cx.listener(Self::dismiss));
 
         div()
             .size_full()
@@ -853,9 +837,9 @@ where
     D: SearchableListDelegate + 'static,
     <D::Item as SearchableListItem>::Value: PartialEq + Clone,
 {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let disabled = self.options.disabled;
-        let focus_handle = self.state.focus_handle(cx);
+        let focus_handle = self.state.read(cx).state.focus_handle.clone();
         let render_trigger = self.render_trigger;
         let footer = self.footer;
         let empty = self.empty;
@@ -881,16 +865,26 @@ where
             }
         });
 
-        div()
-            .id(self.id.clone())
-            .key_context(CONTEXT)
-            .when(!disabled, |this| {
-                this.track_focus(&focus_handle.tab_stop(true))
+        let is_open = self.state.read(cx).state.open;
+        let content_focus_handle = self.state.read(cx).state.list.focus_handle(cx);
+        let open_state = self.state.clone();
+        let confirm_state = self.state.clone();
+
+        BaseCombobox::new(self.id)
+            .open(is_open)
+            .disabled(disabled)
+            .focus_handle(&focus_handle)
+            .content_focus_handle(&content_focus_handle)
+            .on_open_change(move |open, _, cx| {
+                open_state.update(cx, |state, cx| state.set_open(open, cx));
             })
-            .on_action(window.listener_for(&self.state, ComboboxState::up))
-            .on_action(window.listener_for(&self.state, ComboboxState::down))
-            .on_action(window.listener_for(&self.state, ComboboxState::enter))
-            .on_action(window.listener_for(&self.state, ComboboxState::escape))
+            // This combobox commits its pending selection when the popup
+            // closes, so it listens for dismissal rather than Confirm.
+            .on_dismiss(move |_, cx| {
+                confirm_state.update(cx, |state, cx| {
+                    cx.emit(ComboboxEvent::Confirm(state.selected_values()));
+                });
+            })
             .size_full()
             .child(self.state)
     }
@@ -929,9 +923,7 @@ fn render_trigger_container(
                 .when(disabled, |this| this.opacity(0.5))
                 .border_color(cx.theme().input)
                 .rounded(cx.theme().radius)
-                .when(cx.theme().shadow, |this| this.shadow_xs())
         })
-        .map(|this| if disabled { this.shadow_none() } else { this })
         .overflow_hidden()
         .input_size(size)
         .input_text_size(size)
@@ -982,7 +974,7 @@ fn render_popup_shell<D: SearchableListDelegate + 'static>(
                     v_flex()
                         .occlude()
                         .mt_1p5()
-                        .bg(cx.theme().background)
+                        .bg(cx.theme().tokens.popover)
                         .border_1()
                         .border_color(cx.theme().border)
                         .rounded(popup_radius)
@@ -1015,16 +1007,47 @@ fn render_popup_shell<D: SearchableListDelegate + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext};
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{
+        AppContext as _, Bounds, Context, Entity, Modifiers, MouseButton, MouseDownEvent, Pixels,
+        Point, Subscription, TestAppContext, point, px, size,
+    };
 
     use crate::{
         IndexPath,
-        combobox::{Combobox, ComboboxState},
+        combobox::{Combobox, ComboboxEvent, ComboboxState},
         searchable_list::{
             SearchableListChange, SearchableListDelegate, SearchableListItem, SearchableListState,
             SearchableVec,
         },
     };
+
+    struct TestComboboxEventCollector {
+        event_count: Rc<Cell<usize>>,
+        _subscription: Subscription,
+    }
+
+    impl TestComboboxEventCollector {
+        fn new(
+            state: &Entity<ComboboxState<SearchableVec<&'static str>>>,
+            cx: &mut Context<Self>,
+        ) -> Self {
+            let event_count = Rc::new(Cell::new(0));
+            let event_count_for_subscription = event_count.clone();
+            let _subscription = cx.subscribe(
+                state,
+                move |_, _, _: &ComboboxEvent<SearchableVec<&'static str>>, _| {
+                    event_count_for_subscription.set(event_count_for_subscription.get() + 1);
+                },
+            );
+
+            Self {
+                event_count,
+                _subscription,
+            }
+        }
+    }
 
     #[gpui::test]
     fn test_combo_box_builder(cx: &mut TestAppContext) {
@@ -1104,6 +1127,97 @@ mod tests {
                 .disabled(false);
 
             assert_eq!(state.read(cx).selected_values(), vec!["React"]);
+        });
+    }
+
+    #[gpui::test]
+    fn test_combo_box_set_selected_values_uses_current_delegate(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            let items = SearchableVec::new(vec!["React", "Vue", "Angular"]);
+            let state = cx.new(|cx| ComboboxState::new(items, vec![], window, cx).multiple(true));
+
+            state.update(cx, |state, cx| {
+                state.set_selected_values(&["Vue", "Missing"], window, cx);
+
+                assert_eq!(state.selected_values(), vec!["Vue"]);
+                assert_eq!(
+                    state
+                        .selection()
+                        .iter()
+                        .map(|(index, _)| *index)
+                        .collect::<Vec<_>>(),
+                    vec![IndexPath::new(1)],
+                );
+                assert_eq!(
+                    state
+                        .state
+                        .list
+                        .read(cx)
+                        .delegate()
+                        .selection_snapshot
+                        .as_slice(),
+                    state.selection(),
+                );
+
+                state.set_items(SearchableVec::new(vec!["Vue", "Rust", "Go"]), window, cx);
+                state.set_selected_values(&["Go", "Vue"], window, cx);
+
+                assert_eq!(state.selected_values(), vec!["Go", "Vue"]);
+                assert_eq!(
+                    state
+                        .selection()
+                        .iter()
+                        .map(|(index, _)| *index)
+                        .collect::<Vec<_>>(),
+                    vec![IndexPath::new(2), IndexPath::new(0)],
+                );
+                assert_eq!(
+                    state
+                        .state
+                        .list
+                        .read(cx)
+                        .delegate()
+                        .selection_snapshot
+                        .as_slice(),
+                    state.selection(),
+                );
+
+                state.set_selected_values(&[], window, cx);
+
+                assert!(state.selection().is_empty());
+                assert!(
+                    state
+                        .state
+                        .list
+                        .read(cx)
+                        .delegate()
+                        .selection_snapshot
+                        .is_empty()
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_combo_box_set_selected_values_does_not_emit_events(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let cx = cx.add_empty_window();
+        let state = cx.update(|window, cx| {
+            let items = SearchableVec::new(vec!["React", "Vue", "Angular"]);
+            cx.new(|cx| ComboboxState::new(items, vec![], window, cx).multiple(true))
+        });
+        let collector = cx.update(|_, cx| cx.new(|cx| TestComboboxEventCollector::new(&state, cx)));
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.set_selected_values(&["React", "Vue"], window, cx);
+            });
+        });
+
+        cx.update(|_, cx| {
+            assert_eq!(collector.read(cx).event_count.get(), 0);
         });
     }
 
@@ -1329,6 +1443,62 @@ mod tests {
 
             // Selection must remain unchanged because on_will_change left it unmodified.
             assert_eq!(state.read(cx).selected_values(), &["Rust"]);
+        });
+    }
+
+    fn left_press(position: Point<Pixels>) -> MouseDownEvent {
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+
+    #[gpui::test]
+    fn test_combo_box_dismiss_ignores_press_on_trigger(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let cx = cx.add_empty_window();
+        let state = cx.update(|window, cx| {
+            let items = SearchableVec::new(vec!["React", "Vue", "Angular"]);
+            cx.new(|cx| ComboboxState::new(items, vec![], window, cx).multiple(true))
+        });
+        let collector = cx.update(|_, cx| cx.new(|cx| TestComboboxEventCollector::new(&state, cx)));
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.state.bounds = Bounds {
+                    origin: point(px(10.), px(10.)),
+                    size: size(px(200.), px(32.)),
+                };
+                state.set_open(true, cx);
+                state.dismiss(&left_press(point(px(20.), px(20.))), window, cx);
+            });
+        });
+
+        cx.update(|_, cx| {
+            assert!(
+                state.read(cx).state.open,
+                "a press on the trigger must reach nested controls, so the menu stays open \
+                 and `toggle_menu` closes it on release instead",
+            );
+            assert_eq!(collector.read(cx).event_count.get(), 0);
+        });
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.dismiss(&left_press(point(px(20.), px(200.))), window, cx);
+            });
+        });
+
+        cx.update(|_, cx| {
+            assert!(!state.read(cx).state.open);
+            assert_eq!(
+                collector.read(cx).event_count.get(),
+                1,
+                "dismissing from outside the trigger emits Confirm",
+            );
         });
     }
 
