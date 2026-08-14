@@ -324,7 +324,7 @@ impl DatePicker {
             placeholder: None,
             size: Size::default(),
             style: StyleRefinement::default(),
-            number_of_months: 2,
+            number_of_months: 1,
             presets: None,
             appearance: true,
             disabled: false,
@@ -349,7 +349,7 @@ impl DatePicker {
         self
     }
 
-    /// Set number of months to display in the calendar, default is 2.
+    /// Set number of months to display in the calendar, default is 1.
     pub fn number_of_months(mut self, number_of_months: usize) -> Self {
         self.number_of_months = number_of_months;
         self
@@ -519,7 +519,7 @@ impl RenderOnce for DatePicker {
                                 ),
                         ),
                     )
-                    .with_priority(2),
+                    .with_priority(gpui_base::POPUP_PRIORITY),
                 )
             })
     }
