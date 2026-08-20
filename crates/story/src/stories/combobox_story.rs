@@ -1,6 +1,6 @@
 use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{
-    ActiveTheme, Icon, IconName, IndexPath, Sizable as _,
+    ActiveTheme, Icon, IconName, IndexPath, Sizable as _, ThemeStyled as _,
     button::Button,
     button::ButtonVariants as _,
     combobox::*,
@@ -260,7 +260,7 @@ impl SearchableListDelegate for FeaturedDelegate {
                 })
                 .child(
                     div()
-                        .rounded_sm()
+                        .rounded(cx.theme().radius.half())
                         .bg(cx.theme().primary)
                         .text_color(cx.theme().primary_foreground)
                         .px_1()
@@ -288,7 +288,7 @@ pub struct ComboboxStory {
     // 05 custom check icon (single)
     custom_check: Entity<ComboboxState<SearchableVec<&'static str>>>,
     // 06 footer button (single)
-    with_footer: Entity<ComboboxState<SearchableVec<&'static str>>>,
+    with_footer: Entity<ComboboxState<SearchableVec<String>>>,
     // 07 custom trigger (single)
     custom_trigger: Entity<ComboboxState<SearchableVec<&'static str>>>,
     // 08 multi badges
@@ -399,8 +399,12 @@ impl ComboboxStory {
         });
 
         let with_footer = cx.new(|cx| {
-            let items =
-                SearchableVec::new(vec!["Harvard University", "MIT", "Stanford", "Cambridge"]);
+            let items = SearchableVec::new(vec![
+                "Harvard University".to_string(),
+                "MIT".to_string(),
+                "Stanford".to_string(),
+                "Cambridge".to_string(),
+            ]);
             ComboboxState::new(items, vec![IndexPath::default()], window, cx).searchable(true)
         });
 
@@ -631,11 +635,13 @@ impl Render for ComboboxStory {
                 section("Footer")
                     .w(px(280.))
                     .description("Add an action below the option list.")
-                    .child(
+                    .child({
+                        let state = self.with_footer.clone();
                         Combobox::new(&self.with_footer)
                             .placeholder("Select university")
                             .search_placeholder("Search…")
-                            .footer(|_, cx| {
+                            .footer(move |_, cx| {
+                                let state = state.clone();
                                 Button::new("add-new")
                                     .ghost()
                                     .label("New university")
@@ -643,10 +649,26 @@ impl Render for ComboboxStory {
                                     .text_color(cx.theme().foreground)
                                     .w_full()
                                     .justify_start()
+                                    .on_click(move |_, window, cx| {
+                                        let search_query = state.read(cx).query(cx);
+                                        let mut items = SearchableVec::new(vec![
+                                            "Harvard University".to_string(),
+                                            "MIT".to_string(),
+                                            "Stanford".to_string(),
+                                            "Cambridge".to_string(),
+                                            search_query.to_string(),
+                                        ]);
+
+                                        drop(items.perform_search(&search_query, window, cx));
+
+                                        state.update(cx, |state, cx| {
+                                            state.set_items(items, window, cx);
+                                        });
+                                    })
                                     .into_any_element()
                             })
-                            .w(px(280.)),
-                    ),
+                            .w(px(280.))
+                    }),
             )
             .child(
                 section("Custom trigger")
@@ -684,7 +706,7 @@ impl Render for ComboboxStory {
                                                     div()
                                                         .bg(cx.theme().primary)
                                                         .text_color(cx.theme().primary_foreground)
-                                                        .rounded_full()
+                                                        .rounded_full_style(cx)
                                                         .px_2()
                                                         .py_0p5()
                                                         .text_xs()
@@ -745,7 +767,7 @@ impl Render for ComboboxStory {
                                                         .min_w_0()
                                                         .gap_0p5()
                                                         .items_center()
-                                                        .rounded_sm()
+                                                        .rounded(cx.theme().radius.half())
                                                         .border_1()
                                                         .border_color(cx.theme().border)
                                                         .px_1()
@@ -851,7 +873,7 @@ impl Render for ComboboxStory {
                                     .children(trigger.selection().iter().take(MAX_SHOWN).map(
                                         |(_index, item)| {
                                             div()
-                                                .rounded_sm()
+                                                .rounded(cx.theme().radius.half())
                                                 .border_1()
                                                 .border_color(cx.theme().border)
                                                 .px_1()
@@ -863,7 +885,7 @@ impl Render for ComboboxStory {
                                         let hidden = trigger.selection().len() - MAX_SHOWN;
                                         this.child(
                                             div()
-                                                .rounded_sm()
+                                                .rounded(cx.theme().radius.half())
                                                 .border_1()
                                                 .border_color(cx.theme().border)
                                                 .px_1()
@@ -911,7 +933,7 @@ impl Render for ComboboxStory {
                                             .min_w(px(16.))
                                             .h(px(16.))
                                             .px_1()
-                                            .rounded_full()
+                                            .rounded_full_style(cx)
                                             .bg(cx.theme().red)
                                             .text_color(white())
                                             .text_size(px(10.))

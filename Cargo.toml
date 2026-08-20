@@ -40,11 +40,11 @@ gpui-component-assets = { path = "crates/assets", version = "0.5.1" }
 gpui-fps = { path = "crates/fps", version = "0.1.0" }
 story = { path = "crates/story" }
 
-gpui = { git = "https://github.com/zed-industries/zed.git", rev = "a8fafdd7ee36fb3fb98ebbfe5d3be983301d9e74" }
-gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "a8fafdd7ee36fb3fb98ebbfe5d3be983301d9e74", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui_web = { git = "https://github.com/zed-industries/zed.git", rev = "a8fafdd7ee36fb3fb98ebbfe5d3be983301d9e74" }
-gpui_macros = { git = "https://github.com/zed-industries/zed.git", rev = "a8fafdd7ee36fb3fb98ebbfe5d3be983301d9e74" }
-reqwest_client = { git = "https://github.com/zed-industries/zed.git", rev = "a8fafdd7ee36fb3fb98ebbfe5d3be983301d9e74" }
+gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed.git", rev = "2936989f1b7a15aaf7131b0a3c17961d706fdbf5", features = ["profiler"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "2936989f1b7a15aaf7131b0a3c17961d706fdbf5", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui_web = { git = "https://github.com/zed-industries/zed.git", rev = "2936989f1b7a15aaf7131b0a3c17961d706fdbf5" }
+gpui_macros = { version = "0.1.0", git = "https://github.com/zed-industries/zed.git", rev = "2936989f1b7a15aaf7131b0a3c17961d706fdbf5" }
+reqwest_client = { git = "https://github.com/zed-industries/zed.git", rev = "2936989f1b7a15aaf7131b0a3c17961d706fdbf5" }
 sum-tree = { version = "0.2.0", package = "zed-sum-tree" }
 # reqwest = { version = "0.12.15-zed", package = "zed-reqwest" }
 reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", default-features = false, features = [
@@ -64,6 +64,7 @@ lsp-types = { version = "0.97.0", features = ["proposed"] }
 notify = "7.0.0"
 raw-window-handle = "0.6.2"
 ropey = { version = "=2.0.0-beta.1", features = [
+    "metric_chars",
     "metric_lines_lf",
     "metric_utf16",
 ] }
