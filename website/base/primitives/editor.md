@@ -21,11 +21,10 @@ use gpui_base::input::{Editor, EditorState, TabSize};
 
 ## Basic usage
 
-The language is required when constructing the state:
-
 ```rust
 let editor = cx.new(|cx| {
-    EditorState::new("rust", window, cx)
+    EditorState::new(window, cx)
+        .language("rust")
         .line_number(true)
         .folding(true)
         .tab_size(TabSize {
@@ -42,7 +41,8 @@ Editor::new(&editor)
 
 ```rust
 let editor = cx.new(|cx| {
-    EditorState::new("rust", window, cx)
+    EditorState::new(window, cx)
+        .language("rust")
         .show_whitespaces(true)
         .default_value(source)
 });
@@ -83,5 +83,5 @@ the [`gpui-component` Editor](../../docs/components/editor.md).
 ## Runnable example
 
 ```bash
-cargo run -p gpui-base --example base_components -- editor
+cargo run -p gpui-base --example components -- editor
 ```
